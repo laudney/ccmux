@@ -315,6 +315,7 @@ Comment the file however you like. When ccmux saves it (a Settings row, `ccmux h
 
 - Live dashboard of every agent session across every project, with state (active / idle / **needs_input**) and per-row agent tags
 - One-key attach, kill, rename — applies a styled tmux status bar so you always know where you are
+- Two projects with the same folder name (`~/Projects/api` and `~/work/api`) get separate sessions. Whichever started first keeps `c-api`, the other gets `c-api-<tag>`, and ccmux matches each one to its project by directory
 - Per-session "keep awake" pin — the daemon holds a sleep-prevention lock while any pinned or active session is alive
 - **Three sleep-prevention modes** — `safe`, `dangerous`, `very_dangerous` (sudo-gated; system-wide override that survives lid-close)
 
@@ -373,6 +374,7 @@ Comment the file however you like. When ccmux saves it (a Settings row, `ccmux h
 - **Local** — manages tmux sessions on this machine; prevents sleep while sessions are active
 - **Server** — daemon binds an HTTP API to your Tailscale interface for remote ccmux clients
 - **Mixed** — dashboard shows local + remote sessions, color-coded by origin
+- Same from a shell: `ccmux list`, `attach`, `kill` and `rename` take `--host <name>` for any host you added with `ccmux host add`. `ccmux kill --host mini api` kills the mini's `api` session, not yours
 
 ### 🩺 Setup, doctor, update
 
