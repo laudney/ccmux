@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,7 +25,19 @@ import (
 //   - claude_v2_permission.txt      tool-permission dialog ("Do you want to proceed?")
 //   - claude_v2_trust.txt           workspace trust dialog ("Enter to confirm · Esc to cancel")
 //   - claude_crashed_shell.txt      claude died, zsh prompt at the tail
+//   - claude_crashed_p10k.txt       claude died mid-session, powerlevel10k framed prompt (`╰─❯ `)
+//   - claude_crashed_starship.txt   the same crash, starship's two-line prompt (`❯ `)
+//   - claude_crashed_ohmyzsh.txt    the same crash, oh-my-zsh's default `➜  demo git:(main) ✗ `
 //   - opencode_networking_working.txt the real OpenCode capture with its running footer
+//
+// Capturing a new one from a live session S — the same capture the
+// daemon takes, plus the OSC title, which matters for Claude because a
+// braille spinner there outranks every body rule:
+//
+//	tmux capture-pane -p -t S -S -60 > testdata/panes/NAME.txt
+//	tmux display-message -p -t S '#{pane_title}' > testdata/panes/NAME.title
+//
+// then add a TestDetectionFixtures row with titleSidecar as its title.
 func readPaneFixture(t *testing.T, name string) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("testdata", "panes", name))
@@ -34,12 +47,28 @@ func readPaneFixture(t *testing.T, name string) string {
 	return string(b)
 }
 
+// titleSidecar, as a TestDetectionFixtures row's title, reads the title
+// captured next to the pane: NAME.title beside NAME.txt.
+const titleSidecar = "<NAME.title>"
+
+// readTitleFixture returns the OSC title captured alongside a pane
+// fixture, minus display-message's trailing newline.
+func readTitleFixture(t *testing.T, paneName string) string {
+	t.Helper()
+	name := strings.TrimSuffix(paneName, filepath.Ext(paneName)) + ".title"
+	b, err := os.ReadFile(filepath.Join("testdata", "panes", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSuffix(string(b), "\n")
+}
+
 // TestDetectionFixtures pins what each fixture classifies as through
-// the daemon's real entry point — ClassifyState, which applies the rule
-// engine, the require_idle gate and the per-agent fallback — both when
-// the pane has been quiet for ten minutes and when it just changed.
-// A rule-file edit that silently breaks detection for a real screen
-// fails here.
+// ClassifyState (the daemon reaches it via ClassifyStateFrom), which
+// applies the rule engine, the require_idle gate and the per-agent
+// fallback — both when the pane has been quiet for ten minutes and when
+// it just changed. A rule-file edit that silently breaks detection for
+// a real screen fails here.
 func TestDetectionFixtures(t *testing.T) {
 	const idle = 3 * time.Second // the daemon's default idle_seconds_for_needs_input
 	quiet := time.Now().Add(-10 * time.Minute)
@@ -58,7 +87,7 @@ func TestDetectionFixtures(t *testing.T) {
 		{"claude_v2_idle.txt", IDClaude, "", false, StateActive},
 		{"claude_v2_working.txt", IDClaude, "", false, StateActive},
 		{"claude_v2_working.txt", IDClaude, "⠐ Fix flaky poll test", false, StateActive},
-		{"claude_v2_working.txt", IDClaude, "⠐ Fix flaky poll test", true, StateActive},
+		{"claude_v2_working.txt", IDClaude, titleSidecar, true, StateActive},
 		{"claude_v2_typed_multiline.txt", IDClaude, "", true, StateNeedsInput},
 		{"claude_v2_typed_multiline.txt", IDClaude, "", false, StateActive},
 		// A `%`-terminated footer or statusline is not a crashed shell.
@@ -74,6 +103,15 @@ func TestDetectionFixtures(t *testing.T) {
 		// A real shell prompt at the tail is still a crash.
 		{"claude_crashed_shell.txt", IDClaude, "", true, StateError},
 		{"claude_crashed_shell.txt", IDClaude, "", false, StateError},
+		// … including the modern prompt themes. p10k's `╰─❯ ` read as
+		// Claude's v1 frame (needs_input + a bell); starship's `❯ ` and
+		// oh-my-zsh's `➜` line read as merely idle.
+		{"claude_crashed_p10k.txt", IDClaude, "", true, StateError},
+		{"claude_crashed_p10k.txt", IDClaude, "", false, StateError},
+		{"claude_crashed_starship.txt", IDClaude, "", true, StateError},
+		{"claude_crashed_starship.txt", IDClaude, "", false, StateError},
+		{"claude_crashed_ohmyzsh.txt", IDClaude, "", true, StateError},
+		{"claude_crashed_ohmyzsh.txt", IDClaude, "", false, StateError},
 
 		// OpenCode (and its fork Kilo): a cwd containing "working"
 		// must not pin the session active forever.
@@ -89,8 +127,11 @@ func TestDetectionFixtures(t *testing.T) {
 			lastChange, when = quiet, "quiet"
 		}
 		t.Run(string(tc.agent)+"/"+tc.fixture+"/"+when+"/title="+tc.title, func(t *testing.T) {
-			pane := readPaneFixture(t, tc.fixture)
-			if got := ClassifyState(ByID(tc.agent), pane, tc.title, lastChange, idle); got != tc.want {
+			pane, title := readPaneFixture(t, tc.fixture), tc.title
+			if title == titleSidecar {
+				title = readTitleFixture(t, tc.fixture)
+			}
+			if got := ClassifyState(ByID(tc.agent), pane, title, lastChange, idle); got != tc.want {
 				t.Errorf("ClassifyState = %v, want %v", got, tc.want)
 			}
 		})
@@ -110,7 +151,7 @@ func TestClaudeFallbackAgreesWithRules(t *testing.T) {
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if len(name) < len("claude_") || name[:len("claude_")] != "claude_" {
+		if !strings.HasPrefix(name, "claude_") || filepath.Ext(name) != ".txt" {
 			continue
 		}
 		pane := readPaneFixture(t, name)

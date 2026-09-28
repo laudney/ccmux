@@ -71,21 +71,23 @@ func classifyTitle(title string) (State, bool) {
 // `lastChange` is when this session's pane content last changed (the caller
 // tracks this — typically the daemon's poll loop).
 func Classify(pane string, lastChange time.Time, idleNeedsInput time.Duration) State {
-	if pane == "" {
-		return StateUnknown
-	}
-	trimmed := strings.TrimRight(pane, " \n\t")
-	if trimmed == "" {
-		return StateUnknown
-	}
 	// The bottom of the pane is where every prompt shape lives: the
 	// v1 rounded frame on the last line, the v2 ruled input box plus
 	// its footer, a v2 dialog, or a shell prompt after a crash.
-	bottom := lastNonEmptyLines(trimmed, promptRegionLines)
+	//
+	// The lines are taken untrimmed, byte for byte what the engine's
+	// last_line / bottom_non_empty_lines(N) regions hold: the prompt
+	// regexes allow for indentation and trailing blanks themselves.
+	// Trimming first (the pane's trailing spaces, or strings.TrimSpace
+	// on the last line, which also eats non-breaking and other Unicode
+	// spaces the rules' \s does not) let the two classifiers disagree on
+	// the same pane. Blank lines are skipped, so an all-blank pane has
+	// no bottom and stays unknown.
+	bottom := lastNonEmptyLines(pane, promptRegionLines)
 	if len(bottom) == 0 {
 		return StateUnknown
 	}
-	tail := strings.TrimSpace(bottom[len(bottom)-1])
+	tail := bottom[len(bottom)-1]
 	switch {
 	case looksLikeClaudePrompt(tail), looksLikeClaudeV2Prompt(bottom), looksLikeClaudeV2Dialog(bottom):
 		if time.Since(lastChange) >= idleNeedsInput {
@@ -116,36 +118,33 @@ func SnapshotSession(ctx context.Context, session string, lastChange time.Time, 
 	}, nil
 }
 
-// looksLikeClaudePrompt is a heuristic for "Claude is currently rendering its
-// input box waiting on the user." Claude Code uses rounded box-drawing
-// characters in its TUI; matching is intentionally loose because the exact
-// art changes across versions.
+// looksLikeClaudePrompt reports whether line is a border of Claude Code
+// v1's rounded input frame (`╭──────╮` / `╰──────╯`) — the shape of the
+// last pane line while v1 waits on the user. Mirrors the
+// claude_prompt_frame rule in internal/agentdetect/rules/claude.toml.
 //
-// Previously the heuristic counted hits across {╭╮╰╯│─>} and matched
-// at ≥2 — which false-positived on output that emits two of {│,─,>}:
-// `tree` output, `gh`/`bat` headers, the ccmux tmux status bar
-// itself. Each false positive fired a spurious bell + APNs push.
+// History of the heuristic:
 //
-// The fix: require one of the rounded corner glyphs ╭╮╰╯. Those
-// appear in Claude's input frame and rarely anywhere else (`tree` uses
-// the sharp variants ┌┐└┘, status bars use bare verticals, ASCII art
-// uses straight lines). We still require a second hit from the
-// extended set so a stray rune in user-typed content doesn't trigger.
+//   - Counting hits across {╭╮╰╯│─>} and matching at ≥2 false-positived
+//     on output that emits two of {│,─,>}: `tree` output, `gh`/`bat`
+//     headers, the ccmux tmux status bar itself. Each fired a spurious
+//     bell + APNs push.
+//   - Requiring a rounded corner ╭╮╰╯ plus a second glyph from that set
+//     still matched modern shell prompts left behind after Claude
+//     crashed: powerlevel10k's framed prompt ends in `╰─❯ ` and
+//     oh-my-zsh's bira theme in `╰─$ ` — a false needs_input and bell
+//     instead of the crash (error) state.
+//
+// So now the line must begin (after indentation) with a real border: a
+// left corner `╭`/`╰` followed by a run of three or more `─`, or by a
+// closing corner `╮`/`╯` joined to it by nothing but `─`. A lone `╰`
+// (a capture racing a partial redraw) never matches.
 func looksLikeClaudePrompt(line string) bool {
-	if line == "" {
-		return false
-	}
-	if !strings.ContainsAny(line, "╭╮╰╯") {
-		return false
-	}
-	hits := 0
-	for _, ch := range "╭╮╰╯│─>" {
-		if strings.ContainsRune(line, ch) {
-			hits++
-		}
-	}
-	return hits >= 2
+	return v1FrameBorderRE.MatchString(line)
 }
+
+// v1FrameBorderRE is the claude_prompt_frame rule's regex, verbatim.
+var v1FrameBorderRE = regexp.MustCompile(`^[ \t]*[╭╰](?:─{3,}|─*[╮╯])`)
 
 // promptRegionLines is how many trailing non-empty lines the v2 input
 // box and dialog checks scan: a multi-line typed prompt plus the
@@ -156,7 +155,7 @@ const promptRegionLines = 12
 
 // shellRegionLines mirrors claude_shell_prompt's
 // bottom_non_empty_lines(4): the lines that must be free of Claude
-// chrome before a `$`/`#`/`%` tail is believed to be a shell prompt.
+// chrome before a shell-looking tail is believed to be a shell prompt.
 const shellRegionLines = 4
 
 // ruleLinePrefix is the start of a v2 input-box border: a run of at
@@ -207,13 +206,20 @@ func looksLikeClaudeV2Dialog(lines []string) bool {
 }
 
 // hasClaudeChrome reports whether any line carries Claude UI furniture —
-// rounded corners, a `────` rule, the `❯` prompt glyph or the `⏵⏵`
-// mode footer. Claude's own footer or a statusline can end in `%`
-// (`Context left until auto-compact: 7%`), so a `%` tail only means a
-// shell prompt when none of this is on screen.
+// a v1 frame border, a v2 `────` input-box rule, or the `⏵⏵` mode
+// footer. Claude's own footer or a statusline can end in `%`
+// (`Context left until auto-compact: 7%`), so a shell-looking tail only
+// means a crash when none of this is on screen. Mirrors the `not` block
+// of claude_shell_prompt.
+//
+// The checks are line shapes, not bare glyphs: a crashed session's
+// fallback shell can draw rounded corners and `─` runs of its own
+// (powerlevel10k's `╭─ ~/demo  main ───── ✔` / `╰─❯ `), and the `❯`
+// prompt char is shared by starship, pure and p10k. Claude's v2 `❯`
+// input line always sits between two rules, so the rule check covers it.
 func hasClaudeChrome(lines []string) bool {
 	for _, l := range lines {
-		if strings.ContainsAny(l, "╭╮╰╯❯⏵") || strings.Contains(l, ruleLinePrefix) {
+		if looksLikeClaudePrompt(l) || isRuleLine(l) || strings.ContainsRune(l, '⏵') {
 			return true
 		}
 	}
@@ -260,13 +266,25 @@ func lastN(lines []string, n int) []string {
 	return lines[len(lines)-n:]
 }
 
+// shellPromptREs are the prompt shapes of claude_shell_prompt's `any`
+// block, verbatim: a `$`/`#`/`%` terminator (bash, root, stock zsh); the
+// `❯` prompt char of starship, pure and powerlevel10k, bare or behind
+// p10k's `╰─` frame; and oh-my-zsh's default `➜  demo git:(main) ✗ `.
+var shellPromptREs = []*regexp.Regexp{
+	regexp.MustCompile(`[\$#%]\s*\z`),
+	regexp.MustCompile(`❯[\s\x{00A0}]*\z`),
+	regexp.MustCompile(`(?m)^[ \t]*➜[ \t]+(?:\S+(?:[ \t]+git:\([^)\n]*\))?(?:[ \t]+✗)?)?\s*\z`),
+}
+
 // looksLikeShellPrompt heuristically matches a bare shell prompt (Claude has
 // exited or crashed and we're sitting at zsh/bash).
 func looksLikeShellPrompt(line string) bool {
-	// Common terminators of a shell prompt.
-	if strings.HasSuffix(line, "$") || strings.HasSuffix(line, "#") || strings.HasSuffix(line, "%") {
-		// Make sure it doesn't look like Claude's prompt either.
-		if !looksLikeClaudePrompt(line) {
+	// Make sure it doesn't look like Claude's prompt either.
+	if looksLikeClaudePrompt(line) {
+		return false
+	}
+	for _, re := range shellPromptREs {
+		if re.MatchString(line) {
 			return true
 		}
 	}
