@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -23,6 +24,48 @@ func padLabel(label string, width int) string {
 		return label + strings.Repeat(" ", n)
 	}
 	return label
+}
+
+// labelColumn is the width of a label column holding labels (already
+// translated): the widest one plus a one-cell gap, at least minW. A
+// fixed column sized for the English labels let a longer translation
+// ("Arbeitsverzeichnis", "directorio de trabajo") run into its field
+// and push the row past the pane, where it wrapped. maxW > 0 caps the
+// column so the fields keep room on a narrow screen; labels wider than
+// the cap are shortened with "…" (see columnLabel).
+func labelColumn(minW, maxW int, labels ...string) int {
+	w := minW
+	for _, l := range labels {
+		w = maxInt(w, lipgloss.Width(l)+1)
+	}
+	if maxW > 0 && w > maxW {
+		w = maxW
+	}
+	return w
+}
+
+// fitInput sets a text input's visible width and re-scrolls it so the
+// cursor stays in view. The input only recomputes its scroll window as
+// it's edited: narrowing Width alone left a long value (the new-note
+// form's prefilled filename) drawn from its start and cut off, with the
+// cursor off-screen at its end.
+func fitInput(in *textinput.Model, width int) {
+	width = maxInt(1, width)
+	if in.Width == width {
+		return
+	}
+	in.Width = width
+	in.SetCursor(in.Position())
+}
+
+// columnLabel pads label to a labelColumn width, shortening it first
+// when it doesn't fit (the column was capped), so the field after it
+// always starts in the same column.
+func columnLabel(label string, width int) string {
+	if lipgloss.Width(label) >= width {
+		label = truncate(label, width-1)
+	}
+	return padLabel(label, width)
 }
 
 // pickEditor picks the editor to suspend ccmux into. Order: $VISUAL,

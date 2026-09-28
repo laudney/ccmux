@@ -871,7 +871,17 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, previewCmd
 
+	case notesProjectsWantedMsg:
+		if len(a.projects) > 0 {
+			a.notes.SetProjects(a.projects)
+			return a, nil
+		}
+		return a, a.refreshProjectsCmd()
+
 	case projectsLoadedMsg:
+		if msg.Err != nil {
+			a.notes.ProjectsLoadFailed()
+		}
 		if msg.Err == nil {
 			// Like sessions: never let an older refresh that finished
 			// late replace a newer list. Gen 0 is unnumbered.
@@ -965,6 +975,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case sessionRenamedMsg:
+		refresh := a.refreshSessionsCmd()
 		if msg.Err != nil {
 			a.toasts.Set(toastError, tr("rename failed: ")+msg.Err.Error(), 5*time.Second)
 		} else {
@@ -972,8 +983,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Keep the cursor on the renamed row: the refresh below
 			// finds the selection by name, which just changed.
 			a.sessionsM.RenameSession(msg.Host, msg.OldName, msg.NewName)
+			// Refreshes already in flight may have listed the sessions
+			// before the rename; applied late (a slow host holds them
+			// up) they put the old name back, the cursor followed it,
+			// and the next list lost it. Only the refresh started just
+			// now, or a later one, may replace the list.
+			a.sessionsAppliedGen = a.sessionsLoadGen
 		}
-		return a, a.refreshSessionsCmd()
+		return a, refresh
 
 	case remoteSessionStartedMsg:
 		// Remote daemon already created the tmux session for us;

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -32,6 +33,10 @@ func globalHelp(km Keymap) []HelpItem {
 	}
 }
 
+// helpKey is the key a keymap binding is shown under, so the help
+// names the key the binding actually uses.
+func helpKey(b key.Binding) string { return b.Help().Key }
+
 // helpForScreen returns the keybindings *specific to* `s`. These are
 // merged with globalHelp() at render time into two labeled sections,
 // so this list intentionally excludes anything in globalHelp.
@@ -40,18 +45,17 @@ func globalHelp(km Keymap) []HelpItem {
 // across the screen files — it's easier to keep in sync with the
 // actual implementation when there's a single source.
 func helpForScreen(s Screen, km Keymap) []HelpItem {
-	_ = km // currently unused for per-screen items; reserved for future per-screen-keymap variants
 	switch s {
 	case ScreenSessions:
 		return []HelpItem{
 			{"↑↓ / j k", tr("navigate session list")},
 			{"enter", tr("attach (Ctrl-b then d to detach back to ccmux)")},
-			{"n", tr("new session")},
-			{"p", tr("toggle a live preview of the selected session")},
-			{"x", tr("kill selected session")},
-			{"R", tr("rename selected session")},
+			{helpKey(km.NewItem), tr("new session")},
+			{helpKey(km.Preview), tr("toggle a live preview of the selected session")},
+			{helpKey(km.Kill), tr("kill selected session")},
+			{helpKey(km.Rename), tr("rename selected session")},
 			{"u", tr("open the full usage overlay")},
-			{"r", tr("refresh sessions + usage")},
+			{helpKey(km.Refresh), tr("refresh sessions + usage")},
 		}
 	case ScreenProjects:
 		return []HelpItem{
@@ -67,15 +71,21 @@ func helpForScreen(s Screen, km Keymap) []HelpItem {
 	case ScreenConversations:
 		return []HelpItem{
 			{"↑↓ / j k", tr("navigate conversation list")},
+			{"tab / ←→ / h l", tr("move between the agent sections")},
 			{"enter", tr("resume the selected conversation")},
-			{"H", tr("toggle headless / SDK conversations")},
+			{helpKey(km.Preview), tr("preview the selected conversation's transcript")},
+			{helpKey(km.Kill), tr("delete the selected conversation (press x twice to confirm)")},
+			{helpKey(km.ToggleHeadless), tr("toggle headless / SDK conversations")},
 			{"/", tr("Search projects, previews, or IDs")},
-			{"r", tr("refresh conversation list")},
+			{"esc", tr("clear the search, then the project filter")},
+			{helpKey(km.Refresh), tr("refresh conversation list")},
 		}
 	case ScreenNotes:
 		return []HelpItem{
 			{"p / space", tr("switch project (picker modal)")},
-			{"tab / h / l / ←→", tr("toggle focus between list and preview")},
+			{"tab", tr("toggle focus between list and preview")},
+			{"→ / l", tr("expand the folder (on a file: focus the preview)")},
+			{"← / h", tr("collapse the folder or go to its parent (in the preview: back to the list)")},
 			{"↑↓ / j k (list focused)", tr("navigate files (wraps around)")},
 			{"↑↓ / j k (preview focused)", tr("scroll within open doc")},
 			{"mouse wheel", tr("scroll list (left) or doc (right)")},
@@ -83,15 +93,24 @@ func helpForScreen(s Screen, km Keymap) []HelpItem {
 			{"n", tr("new note (asks for filename + optional title, then $EDITOR)")},
 			{"i", tr("show selected note's info (path, frontmatter, counts)")},
 			{"/", tr("search notes in this project")},
+			{"H", tr("switch device (read notes on another reachable machine)")},
 		}
 	case ScreenAgents:
 		return []HelpItem{
-			{"m", tr("pick default model (modal)")},
-			{"e", tr("pick reasoning effort (modal)")},
-			{"a", tr("toggle alwaysThinkingEnabled on/off")},
-			{"y", tr("toggle yolo mode (permissions.defaultMode = bypassPermissions)")},
-			{"c", tr("edit global ~/.claude/CLAUDE.md in $EDITOR")},
+			{"tab / l", tr("next agent")},
+			{"shift+tab / h", tr("previous agent")},
+			{"←→", tr("move focus between the list and the preview")},
 			{"↑↓ / j k + enter", tr("activate a row (the settings.json row opens $EDITOR)")},
+			// Per-agent keys, labelled with the agents they apply to
+			// (the footer shows only the active agent's).
+			{"m", "Claude: " + tr("pick default model (modal)")},
+			{"e", "Claude: " + tr("pick reasoning effort (modal)")},
+			{"a", "Claude: " + tr("toggle alwaysThinkingEnabled on/off")},
+			{"y", "Claude: " + tr("toggle yolo mode (permissions.defaultMode = bypassPermissions)")},
+			{"c", "Claude: " + tr("edit global ~/.claude/CLAUDE.md in $EDITOR")},
+			{"r", "Codex, Antigravity: " + tr("pick reasoning effort (modal)")},
+			{"y", "Codex, Antigravity: " + tr("toggle yolo mode")},
+			{"e", "Codex, Antigravity, Gemini: " + tr("edit the agent's config file in $EDITOR")},
 		}
 	case ScreenSettings:
 		return []HelpItem{
@@ -106,6 +125,7 @@ func helpForScreen(s Screen, km Keymap) []HelpItem {
 			{"↑↓ / j k", tr("navigate device list")},
 			{"enter", tr("plain `ssh -t <host>` into the selected peer")},
 			{"s", tr("open the SSH setup wizard for the focused host")},
+			{"i", tr("open the host-detail overlay")},
 			{"r", tr("refresh tailnet scan + ccmuxd probes")},
 		}
 	}
@@ -123,12 +143,9 @@ func helpForScreen(s Screen, km Keymap) []HelpItem {
 func (a App) renderHelpOverlay(width, height int) string {
 	st := a.styles
 	lines, modalW := a.helpLines(width)
-	visible, footer := helpWindow(lines, a.helpScroll, height)
-	if footer == "" {
-		footer = tr("press ? or esc to close")
-	}
+	visible, offset, maxOff := helpWindow(lines, a.helpScroll, height)
 	// One row, always: helpWindow budgeted exactly one for it.
-	footer = truncate(footer, maxInt(1, modalW-2*st.Spacing.SM))
+	footer := helpFooter(offset, maxOff, maxInt(1, modalW-2*st.Spacing.SM))
 	body := strings.Join(append(visible, "", st.Muted.Render(footer)), "\n")
 	modal := st.PaneFocused.Width(modalW).Render(body)
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
@@ -211,23 +228,48 @@ func (a App) helpLines(width int) ([]string, int) {
 const helpChromeRows = 4
 
 // helpWindow picks the slice of the help text that fits a height-row
-// terminal, starting at offset (clamped). When everything fits it
-// returns all lines and an empty footer; otherwise the footer is a
-// scroll hint with the position. The overlay used to be as tall as its
-// text: on an 80x24 terminal the top of it (the screen's own bindings)
-// was cut off with no way to scroll to it.
-func helpWindow(lines []string, offset, height int) (visible []string, footer string) {
+// terminal, starting at offset (clamped), and returns it with the
+// clamped offset and the largest offset (0 when everything fits). The
+// overlay used to be as tall as its text: on an 80x24 terminal the top
+// of it (the screen's own bindings) was cut off with no way to scroll
+// to it.
+func helpWindow(lines []string, offset, height int) (visible []string, off, maxOff int) {
 	room := height - helpChromeRows
 	if room < 1 {
 		room = 1
 	}
 	if len(lines) <= room {
-		return lines, ""
+		return lines, 0, 0
 	}
-	maxOff := len(lines) - room
+	maxOff = len(lines) - room
 	offset = maxInt(0, minInt(offset, maxOff))
-	return lines[offset : offset+room],
-		fmt.Sprintf(tr("↑↓ scroll %d/%d · ? or esc to close"), offset+1, maxOff+1)
+	return lines[offset : offset+room], offset, maxOff
+}
+
+// helpFooter is the help modal's one-row footer for a textW-wide
+// column: how to close it, plus the scroll position when the help
+// scrolls. The longest form that fits wins; the close hint used to be
+// cut off at 40 columns once the counter reached two digits ("↑↓ scroll
+// 21/21 · ? or esc to clo…").
+func helpFooter(offset, maxOff, textW int) string {
+	var forms []string
+	if maxOff == 0 {
+		forms = []string{tr("press ? or esc to close"), tr("? / esc: close"), "esc"}
+	} else {
+		pos := []any{offset + 1, maxOff + 1}
+		forms = []string{
+			fmt.Sprintf(tr("↑↓ scroll %d/%d · ? or esc to close"), pos...),
+			fmt.Sprintf(tr("↑↓ %d/%d · esc: close"), pos...),
+			fmt.Sprintf("↑↓ %d/%d · esc", pos...),
+			fmt.Sprintf("%d/%d esc", pos...),
+		}
+	}
+	for _, f := range forms {
+		if lipgloss.Width(f) <= textW {
+			return f
+		}
+	}
+	return truncate(forms[len(forms)-1], textW)
 }
 
 // helpScrollMax is the largest useful helpScroll for the current screen
