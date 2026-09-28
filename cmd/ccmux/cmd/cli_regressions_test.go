@@ -3,10 +3,16 @@
 package cmd
 
 import (
+	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/skzv/ccmux/internal/agent"
+	"github.com/skzv/ccmux/internal/conversations"
 )
 
 // hasCall reports whether any recorded tmux invocation contains all of
@@ -99,6 +105,32 @@ func TestAttach_ProjectsFlagOverridesRoot(t *testing.T) {
 	}
 	if !hasCall(e.tmuxCallsWith("new-session"), "-c", other) {
 		t.Errorf("--projects root must win (%s); tmux calls:\n%s", other, strings.Join(e.tmuxCalls(), "\n"))
+	}
+}
+
+// TestAttach_LiveSessionNameAttachesAsIs — `ccmux attach c-shell-abc`
+// (a name `ccmux list` prints for a non-project session) was mapped as
+// a project to c-c-shell-abc and failed with "no project … create it
+// with `ccmux new`". A live session's name must attach as-is, the way
+// `ccmux kill` resolves it.
+func TestAttach_LiveSessionNameAttachesAsIs(t *testing.T) {
+	for _, name := range []string{"c-shell-abc", "work"} {
+		t.Run(name, func(t *testing.T) {
+			e := newCLIEnv(t)
+			e.mkdir("Projects")
+			e.env["FAKE_TMUX_SESSIONS"] = name
+
+			res := e.run("", "attach", name)
+			if res.code != 0 {
+				t.Fatalf("attach %s exit %d\nstderr: %s", name, res.code, res.stderr)
+			}
+			if !hasCall(e.tmuxCallsWith("attach-session"), "-t", exactTarget(name)) {
+				t.Errorf("attach must target the live session %s; tmux calls:\n%s", name, strings.Join(e.tmuxCalls(), "\n"))
+			}
+			if news := e.tmuxCallsWith("new-session"); len(news) != 0 {
+				t.Errorf("no session may be created for a live session name, got: %v", news)
+			}
+		})
 	}
 }
 
@@ -200,6 +232,70 @@ func TestListJSON_EmptyIsArray(t *testing.T) {
 	}
 }
 
+// TestList_HungDaemonFallsBackToTmux — a daemon that accepts the
+// connection but never answers used up list's whole 3s context, and the
+// tmux fallback then ran on that expired context and failed too, so
+// `ccmux list` errored instead of listing the local sessions.
+func TestList_HungDaemonFallsBackToTmux(t *testing.T) {
+	e := newCLIEnv(t)
+	// The socket lives under $HOME; keep the path under the 104-byte
+	// unix-socket limit, which t.TempDir() on macOS exceeds.
+	home, err := os.MkdirTemp("/tmp", "cxl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	e.env["HOME"] = home
+	sockDir := filepath.Join(home, ".local", "state", "ccmux")
+	if err := os.MkdirAll(sockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", filepath.Join(sockDir, "ccmuxd.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		mu    sync.Mutex
+		conns []net.Conn
+	)
+	t.Cleanup(func() {
+		_ = ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	})
+	go func() { // a wedged daemon: accept, never respond
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	e.writeExe("tmux", `case "$1" in
+list-sessions)
+  case "$3" in
+  *session_created*) printf 'c-alive\t1700000000\t1700000000\t0\t1\t/work/alive\n' ;;
+  *) printf 'c-alive\t\n' ;;
+  esac ;;
+esac
+exit 0
+`)
+
+	res := e.run("", "list", "--json")
+	if res.code != 0 {
+		t.Fatalf("list --json with a hung daemon exit %d\nstderr: %s", res.code, res.stderr)
+	}
+	if !strings.Contains(res.stdout, `"c-alive"`) {
+		t.Errorf("list should fall back to tmux's sessions, got:\n%s", res.stdout)
+	}
+}
+
 // --- ccmux kill --------------------------------------------------------------
 
 // TestKill_ResolvesExistingSessionBeforeProject covers every naming
@@ -251,6 +347,139 @@ func TestKill_NothingToKillNamesBothCandidates(t *testing.T) {
 	}
 	if kills := e.tmuxCallsWith("kill-session"); len(kills) != 0 {
 		t.Errorf("no kill-session may be sent for a guessed name: %v", kills)
+	}
+}
+
+// --- conversation IDs --------------------------------------------------------
+
+// seedClaudeTranscript writes a minimal Claude Code transcript for id
+// under $HOME/.claude/projects and returns its path.
+func (e *cliEnv) seedClaudeTranscript(id, prompt string) string {
+	e.t.Helper()
+	dir := e.mkdir(".claude/projects/-work-app")
+	p := filepath.Join(dir, id+".jsonl")
+	body := `{"type":"user","cwd":"/work/app","message":{"role":"user","content":"` + prompt + `"},"timestamp":"2026-09-01T10:00:00.000Z"}` + "\n"
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		e.t.Fatal(err)
+	}
+	return p
+}
+
+// TestConversationIDs_TableFormRoundTrips — list-conversations prints
+// IDs cut to 11 characters plus "…", but resume and delete-conversation
+// took only exact IDs, so pasting what the table showed failed with
+// "no conversation with id".
+func TestConversationIDs_TableFormRoundTrips(t *testing.T) {
+	e := newCLIEnv(t)
+	id := "3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b"
+	path := e.seedClaudeTranscript(id, "fix the login redirect")
+
+	list := e.run("", "list-conversations")
+	short := id[:11] + "…"
+	if list.code != 0 || !strings.Contains(list.stdout, short) {
+		t.Fatalf("list-conversations (exit %d) should show %q:\n%s%s", list.code, short, list.stdout, list.stderr)
+	}
+
+	res := e.run("", "resume", short)
+	if res.code != 0 {
+		t.Fatalf("resume %s exit %d\nstderr: %s", short, res.code, res.stderr)
+	}
+	if !hasCall(e.tmuxCallsWith("new-session"), "-s", conversations.ResumeSessionName(id)) {
+		t.Errorf("resume should start the conversation's session; tmux calls:\n%s", strings.Join(e.tmuxCalls(), "\n"))
+	}
+
+	res = e.run("", "delete-conversation", "--force", short)
+	if res.code != 0 {
+		t.Fatalf("delete-conversation %s exit %d\nstderr: %s", short, res.code, res.stderr)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("transcript still on disk after delete-conversation %s (stat err %v)", short, err)
+	}
+}
+
+// TestResume_AgentListCoversEveryAgent — the --agent help and the
+// unknown-agent error hard-coded seven agents, so every agent added
+// since (gemini, opencode, kiro, …) was missing from both.
+func TestResume_AgentListCoversEveryAgent(t *testing.T) {
+	e := newCLIEnv(t)
+	e.seedClaudeTranscript("3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b", "hello")
+
+	help := e.run("", "resume", "--help")
+	bad := e.run("", "resume", "--agent", "nosuchagent")
+	if bad.code == 0 {
+		t.Fatalf("resume --agent nosuchagent should fail; stdout: %s", bad.stdout)
+	}
+	for _, a := range agent.All() {
+		id := string(a.ID())
+		if !strings.Contains(help.stdout, id) {
+			t.Errorf("resume --help doesn't list agent %q:\n%s", id, help.stdout)
+		}
+		if !strings.Contains(bad.stderr, id) {
+			t.Errorf("unknown-agent error doesn't list agent %q: %s", id, bad.stderr)
+		}
+	}
+}
+
+// --- ccmux mcp unregister / uninstall ----------------------------------------
+
+// TestMCPUnregister_RemovesEntryKeepsTheRest — `ccmux mcp unregister`
+// (no claude CLI on PATH, so it edits ~/.claude.json directly) removes
+// only the ccmux server and is a no-op when re-run.
+func TestMCPUnregister_RemovesEntryKeepsTheRest(t *testing.T) {
+	e := newCLIEnv(t)
+	cfgPath := filepath.Join(e.home, ".claude.json")
+	body := `{"numStartups": 5, "mcpServers": {"ccmux": {"type": "stdio", "command": "ccmux-mcp", "args": []}, "pg": {"type": "stdio", "command": "pg-mcp"}}}`
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	res := e.run("", "mcp", "unregister")
+	if res.code != 0 {
+		t.Fatalf("mcp unregister exit %d\nstderr: %s", res.code, res.stderr)
+	}
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		NumStartups int                        `json:"numStartups"`
+		MCPServers  map[string]json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("~/.claude.json no longer valid JSON: %v\n%s", err, raw)
+	}
+	if _, ok := got.MCPServers["ccmux"]; ok {
+		t.Errorf("ccmux entry still registered:\n%s", raw)
+	}
+	if _, ok := got.MCPServers["pg"]; !ok || got.NumStartups != 5 {
+		t.Errorf("unrelated config lost:\n%s", raw)
+	}
+
+	again := e.run("", "mcp", "unregister")
+	if again.code != 0 || !strings.Contains(again.stdout, "nothing to remove") {
+		t.Errorf("second unregister (exit %d) should be a no-op:\n%s%s", again.code, again.stdout, again.stderr)
+	}
+}
+
+// TestUninstallDryRun_ListsMCPUnregister — the plan printed before the
+// y/N prompt names the MCP cleanup, and --dry-run touches nothing.
+func TestUninstallDryRun_ListsMCPUnregister(t *testing.T) {
+	e := newCLIEnv(t)
+	cfgPath := filepath.Join(e.home, ".claude.json")
+	body := `{"mcpServers": {"ccmux": {"type": "stdio", "command": "ccmux-mcp", "args": []}}}`
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	res := e.run("", "uninstall", "--dry-run")
+	if res.code != 0 {
+		t.Fatalf("uninstall --dry-run exit %d\nstderr: %s", res.code, res.stderr)
+	}
+	if !strings.Contains(res.stdout, "unregister the ccmux MCP server from Claude Code") {
+		t.Errorf("uninstall plan doesn't mention the MCP registration:\n%s", res.stdout)
+	}
+	if raw, _ := os.ReadFile(cfgPath); string(raw) != body {
+		t.Errorf("--dry-run modified ~/.claude.json:\n%s", raw)
 	}
 }
 

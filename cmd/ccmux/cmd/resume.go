@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -33,21 +35,19 @@ func newResumeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "resume [conversation-id]",
 		Short: "Resume a past agent conversation in a new tmux session",
-		Long: `Resume a past Claude / Codex / Antigravity / Cursor / pi / Muse Code conversation in a
-fresh tmux session running the right agent with the native resume command.
+		Long: `Resume a past agent conversation in a fresh tmux session running the
+right agent with its native resume command.
 
 Forms:
 
   ccmux resume                    # most recent conversation across all agents
-  ccmux resume <id>               # specific conversation by ID
-  ccmux resume --agent claude     # most recent Claude conversation
-  ccmux resume --agent codex      # most recent Codex conversation
-  ccmux resume --agent antigravity# most recent Antigravity conversation
-  ccmux resume --agent cursor     # most recent Cursor conversation
-  ccmux resume --agent pi         # most recent pi conversation
-  ccmux resume --agent muse       # most recent Muse Code conversation
+  ccmux resume <id>               # specific conversation by ID (or a unique prefix)
+  ccmux resume --agent <agent>    # most recent conversation for one agent
 
-Use ` + "`ccmux list-conversations`" + ` to discover IDs.`,
+Agents: ` + agentIDList() + `.
+
+Use ` + "`ccmux list-conversations`" + ` to discover IDs. The shortened IDs in
+its table work as-is, trailing "…" included.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			// Always fetch the full list — when the user passes an
@@ -63,9 +63,8 @@ Use ` + "`ccmux list-conversations`" + ` to discover IDs.`,
 
 			var target conversations.Conversation
 			if len(args) == 1 {
-				target = pickByID(list, args[0])
-				if target.ID == "" {
-					return fmt.Errorf("no conversation with id %q (use `ccmux list-conversations` to list)", args[0])
+				if target, err = pickByID(list, args[0]); err != nil {
+					return err
 				}
 			} else {
 				// Bare `ccmux resume` shouldn't drop the user into a
@@ -94,7 +93,7 @@ Use ` + "`ccmux list-conversations`" + ` to discover IDs.`,
 				if agentFilter != "" {
 					want, ok := agent.ParseID(agentFilter)
 					if !ok {
-						return fmt.Errorf("unknown agent %q (claude, codex, antigravity, cursor, pi, grok, muse)", agentFilter)
+						return fmt.Errorf("unknown agent %q (want %s)", agentFilter, agentIDList())
 					}
 					target = pickMostRecentByAgent(list, want)
 					if target.ID == "" {
@@ -108,20 +107,60 @@ Use ` + "`ccmux list-conversations`" + ` to discover IDs.`,
 			return resumeNow(target)
 		},
 	}
-	cmd.Flags().StringVar(&agentFilter, "agent", "", "restrict to a specific agent (claude / codex / antigravity / cursor / pi / grok / muse)")
+	cmd.Flags().StringVar(&agentFilter, "agent", "", "restrict to a specific agent: "+agentIDList())
 	return cmd
 }
 
-// pickByID is the linear-scan lookup. With sub-hundred conversations
-// the cost is negligible; if that ever changes we'll index by ID in
-// the data layer.
-func pickByID(list []conversations.Conversation, id string) conversations.Conversation {
+// pickByID resolves the ID a user typed or pasted. An exact match
+// wins; otherwise a unique prefix does, because the list-conversations
+// table shows IDs cut to 11 characters plus "…" — pasting one used to
+// fail with "no conversation with id". A trailing "…" (or "...") from
+// that column is stripped first. A prefix shared by several
+// conversations is an error that lists them, never a guess.
+//
+// Linear scan: with sub-hundred conversations the cost is negligible;
+// if that ever changes we'll index by ID in the data layer.
+func pickByID(list []conversations.Conversation, id string) (conversations.Conversation, error) {
+	id = strings.TrimSpace(id)
 	for _, c := range list {
 		if c.ID == id {
-			return c
+			return c, nil
 		}
 	}
-	return conversations.Conversation{}
+	prefix := strings.TrimSuffix(strings.TrimSuffix(id, "…"), "...")
+	var matches []conversations.Conversation
+	if prefix != "" {
+		for _, c := range list {
+			if strings.HasPrefix(c.ID, prefix) {
+				matches = append(matches, c)
+			}
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return conversations.Conversation{}, fmt.Errorf("no conversation with id %q (use `ccmux list-conversations` to list)", id)
+	case 1:
+		return matches[0], nil
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "conversation id %q is ambiguous — it matches %d conversations:", id, len(matches))
+	for _, c := range matches {
+		fmt.Fprintf(&b, "\n  %s  %s", c.ID, c.Agent)
+		if c.Preview != "" {
+			fmt.Fprintf(&b, "  %q", truncateRunes(c.Preview, 50))
+		}
+	}
+	b.WriteString("\npass more of the id (`ccmux list-conversations --json` prints full ids)")
+	return conversations.Conversation{}, errors.New(b.String())
+}
+
+// truncateRunes shortens s to at most n runes, marking a cut with "…".
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
 }
 
 // pickMostRecentByAgent assumes the input is already sorted by
@@ -188,7 +227,13 @@ func ensureResumeSession(ctx context.Context, target conversations.Conversation,
 		existed = true
 	}
 	if err := resumeTmuxSetAgent(ctx, name, string(target.Agent)); err != nil {
-		return "", false, err
+		// Don't leave an untagged session behind that the next resume
+		// would silently reuse — but only kill one this call created
+		// (as the TUI does), never a session that was already running.
+		if !existed {
+			_ = resumeTmuxKill(ctx, name)
+		}
+		return "", false, fmt.Errorf("tag tmux session %s with its agent: %w", name, err)
 	}
 	return name, existed, nil
 }
@@ -200,6 +245,7 @@ var (
 	resumeTmuxNew      = tmux.New
 	resumeTmuxHas      = tmux.Has
 	resumeTmuxSetAgent = tmux.SetSessionAgent
+	resumeTmuxKill     = tmux.Kill
 )
 
 // joinArgs glues an argv slice into a shell command, quoting each
