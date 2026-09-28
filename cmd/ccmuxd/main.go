@@ -27,7 +27,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"unicode"
 
 	"github.com/skzv/ccmux/internal/agent"
 	"github.com/skzv/ccmux/internal/apns"
@@ -446,12 +445,12 @@ type tracked struct {
 	lastChange  time.Time // when content last changed
 	state       agent.State
 	promptCount int
-	// agentID is the AI agent this session is running, sourced from
-	// <project>/.ccmux/agent and refreshed by the poll loop. The
-	// classifier for state detection is `agent.ByID(agentID).Classify(…)`
-	// — that's what lets Codex and Antigravity sessions get their own
-	// heuristics instead of borrowing Claude's box-drawing prompt
-	// detector.
+	// agentID is the AI agent this session is running — its tag, its
+	// project's sidecar, or the agent in its foreground (see
+	// fixedAgent in poll.go); shellAgentID for none. The classifier for
+	// state detection is `agent.ByID(agentID)`'s — that's what lets
+	// Codex and Antigravity sessions get their own heuristics instead
+	// of borrowing Claude's box-drawing prompt detector.
 	agentID agent.ID
 	// projectPath is the working directory of the tmux session, used
 	// to resolve the agent sidecar.
@@ -905,14 +904,38 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 	// ccmux-styled bar.
 	s.applyChrome(ctx, session, req.Project)
 
-	writeJSON(w, daemon.SessionState{
+	writeJSON(w, s.startedSessionState(ctx, daemon.SessionState{
 		Name: session, Host: "local", Project: req.Project, Path: path,
-		State: string(agent.StateUnknown), Created: time.Now(),
-		Agent: string(launched),
+		State: string(agent.StateUnknown), Agent: string(launched),
 		// What GET /v1/sessions reports for a session nobody has had a
 		// chance to miss anything in yet.
 		Seen: true,
-	})
+	}))
+}
+
+// startedSessionState completes the answer for a session a create
+// handler just started: its window count, creation time and attached
+// flag as tmux lists them, and — as the poll loop records for a new
+// session — its content as last changed when it started. The response
+// used to carry windows:0 and a zero last_change, which GET
+// /v1/sessions never reports for a live session. If tmux can't list it,
+// the session still has the one window it was created with.
+func (s *server) startedSessionState(ctx context.Context, st daemon.SessionState) daemon.SessionState {
+	st.Created, st.Windows = time.Now(), 1
+	if ts, ok, err := s.lookupSession(ctx, st.Name); err == nil && ok {
+		if !ts.Created.IsZero() {
+			st.Created = ts.Created
+		}
+		st.Windows = max(ts.Windows, 1)
+		st.Attached = ts.Attached
+	}
+	st.LastChange = st.Created
+	s.mu.Lock()
+	if t, ok := s.seen[st.Name]; ok && !t.lastChange.IsZero() {
+		st.LastChange = t.lastChange // a poll tick got to it first
+	}
+	s.mu.Unlock()
+	return st
 }
 
 // requireDir checks that path is an existing directory, answering 404
@@ -1178,23 +1201,22 @@ func parseUsageWindow(q string) time.Duration {
 	return 5 * time.Hour
 }
 
-// badSessionName reports whether a session name contains a character
-// that tmux would interpret as a target qualifier — `:` selects a
-// window/pane, `.` separates window from pane (tmux also rewrites it
-// to `_` in new session names, so the name we'd report back wouldn't
-// exist), `/` and `\` are path separators — or a control character,
-// which no tmux session name can hold (tmux 3.7 refuses it, older
-// versions store it escaped). Centralizes the rule every handler that
-// passes a name to a tmux `-t` argument shares.
+// badSessionName reports whether a session name can't be passed to a
+// tmux `-t` target: tmux.ValidTarget's rule — no leading `$` (tmux reads
+// it as a session ID even in the exact `=name:` form, so
+// POST /v1/sessions/$1/kill killed whichever session had ID $1), no
+// `:` (a window/pane qualifier), `.` (tmux also rewrites it to `_` in
+// new session names on older versions, so the name we'd report back
+// wouldn't exist), `/` or `\` (path separators in these routes), and no
+// control characters. `@` and `%` names are fine: tmux finds them by
+// name in an exact target. Centralizes the rule every handler that
+// passes a name to a tmux `-t` argument shares, and the one the CLI
+// applies before it targets a session.
 //
-// A leading `$` is refused too: tmux reads a target session starting
-// with `$` as a session ID even in the exact `=name:` form, so
-// POST /v1/sessions/$1/kill killed whichever session had ID $1, and a
-// session created as "$0" could never be found by that name (tmux keeps
-// `@` and `%` names verbatim and finds them by name, so those are fine).
+// The empty name is not "bad" here: each caller handles it (an auto
+// name for a new session, "session name required" for a route).
 func badSessionName(name string) bool {
-	return strings.HasPrefix(name, "$") ||
-		strings.ContainsAny(name, "/\\:.") || strings.ContainsFunc(name, unicode.IsControl)
+	return name != "" && !tmux.ValidTarget(name)
 }
 
 const badSessionNameMsg = "name must not start with $ or contain /, \\, :, . or control characters"

@@ -67,7 +67,7 @@ When `--host` is set, the server talks to that ccmuxd over HTTP on the tailnet i
 | `read_pane`         | last N lines of the pane a session's agent runs in (default 24, max 500)                                             |
 | `list_projects`     | every project under the configured root, with agent assignment and a few metadata bits                               |
 | `list_conversations`| past Claude / Codex / Antigravity / Cursor / Pi / Grok transcripts, sorted by recency, with the resumable agent ID   |
-| `get_usage`         | aggregated per-agent token + cost over a rolling window — Claude / Codex / Antigravity, the second-wave agents that have usage, and OpenRouter account spend when configured |
+| `get_usage`         | aggregated per-agent token + cost over the daemon's rolling 5-hour window — Claude / Codex / Antigravity, the second-wave agents that have usage, and OpenRouter account spend when configured. Takes no arguments; a `window` is refused with `-32602` |
 | `list_machines`     | tailnet peers, whether each runs ccmuxd                                                                              |
 | `list_notes`        | every markdown note in a project, grouped by directory                                                               |
 | `read_note`         | one note's full contents                                                                                             |
@@ -91,7 +91,7 @@ Tools are listed in alphabetical order via `tools/list`. Mutating tools are not 
 - **Mutation.** Off by default. The `--allow-mutate` flag is the only way to expose `spawn_session` / `send_keys` / `kill_session`. There is no per-tool override.
 - **Bound input.** `read_pane` caps the requested line count at 500 so a buggy or malicious agent can't drag the daemon down by requesting full scrollback every call.
 - **Per-call deadline.** Every handler runs under a 30-second context — well above legitimate work. `get_daemon_health`, the first probe, gets 5 seconds so a hung daemon is reported quickly.
-- **Concurrency.** Tool calls run concurrently (at most 16 at once; past that the server stops reading until one finishes), so one call stuck on a hung daemon never holds up the rest: `ping`, `initialize`, `tools/list` and protocol errors are answered inline, immediately. Read-only calls run in parallel; a mutating call waits for every call received before it, and every later call waits for it, so pipelined mutations keep their order. `notifications/cancelled` cancels the named in-flight call, which then gets no response (per MCP).
+- **Concurrency.** Tool calls run concurrently, at most 16 at once. Calls past that wait in a first-in-first-out queue and start in the order they arrived; the server keeps reading meanwhile, so hung daemon calls never hold up the rest: `ping`, `initialize`, `tools/list`, `notifications/cancelled` and protocol errors are answered inline, immediately, however many calls are running or queued. The queue holds up to 1024 calls (and 64 MiB of their arguments); a call past that is refused at once with `-32000` ("server busy") rather than blocking. Read-only calls run in parallel; a mutating call waits for every call received before it, and every later call waits for it, so pipelined mutations keep their order. `notifications/cancelled` cancels the named call, which then gets no response (per MCP); a call cancelled while still queued never runs. At EOF on stdin the server finishes every call it accepted, queued ones included, then exits.
 
 ## Wire shapes
 
@@ -135,7 +135,7 @@ Request:
 }
 ```
 
-`arguments` is optional: a missing or `null` value is treated as `{}`. Any other non-object value (a string, an array) is `-32602`. Unknown fields inside the object are ignored rather than refused, despite the schemas' `additionalProperties: false`: some clients pad calls to parameterless tools with a dummy argument.
+`arguments` is optional: a missing or `null` value is treated as `{}`. Any other non-object value (a string, an array) is `-32602`. Unknown fields inside the object are ignored rather than refused, despite the schemas' `additionalProperties: false`: some clients pad calls to parameterless tools with a dummy argument. The one exception is a `window` passed to `get_usage`, refused with `-32602`: the window is fixed, and ignoring the argument returned five hours of data for any window asked for (`"24h"`, or nonsense like `"-5h"`).
 
 ### Request validation
 
@@ -150,7 +150,7 @@ A line holding a JSON array is a JSON-RPC 2.0 batch (protocol 2025-03-26 require
 ## Testing
 
 - `cmd/ccmux-mcp/server_test.go` — protocol-level tests: handshake, ping, parse errors, notifications, unknown method, mutate gating, argument validation, tools list ordering.
-- `cmd/ccmux-mcp/concurrency_test.go` — the dispatcher against a daemon that hangs on demand: a ping or `notifications/cancelled` behind a hung call is handled at once, read-only calls overlap, mutations keep wire order, the in-flight bound holds, and the health probe fails fast.
+- `cmd/ccmux-mcp/concurrency_test.go` — the dispatcher against a daemon that hangs on demand: a ping or `notifications/cancelled` behind a hung call is handled at once — also past the 16-call cap, where a cancelled queued call never runs — read-only calls overlap, mutations keep wire order, the in-flight bound holds, a full queue answers "server busy" at once, EOF runs the queued calls before exiting while a dead stdout drops them, and the health probe fails fast.
 - `cmd/ccmux-mcp/handlers_test.go` — per-tool tests against a `fakeClient` that records every daemon call. Confirms argument forwarding, nil-safety, and `lines` capping for `read_pane`.
 - `internal/e2e/mcp_test.go` (`//go:build integration`) — spawns the real `ccmux-mcp` binary against a real ccmuxd in the isolated `TMUX_TMPDIR` sandbox. Runs `initialize` → `tools/list` → `tools/call list_sessions` end-to-end and confirms a live tmux session appears in the result. Mutate-gate-off path is pinned end-to-end too.
 

@@ -29,6 +29,7 @@ func TestDecideAttention(t *testing.T) {
 		prev, next         agent.State
 		prevSeen, attached bool
 		work, worked       bool
+		joined             bool
 		want               want
 	}{
 		// === HAPPY PATHS: not attached, the agent's turn ended. ===
@@ -149,6 +150,21 @@ func TestDecideAttention(t *testing.T) {
 			prevSeen: true, worked: true,
 			want: want{newSeen: true},
 		},
+		// === JOINED: a session the daemon first saw already running, not
+		//     yet settled. Whatever it settles into is published, not
+		//     announced — the end of a turn it was caught in, or a crash. ===
+		{
+			name: "joined: needs_input after work → event only",
+			prev: agent.StateActive, next: agent.StateNeedsInput,
+			prevSeen: true, worked: true, joined: true,
+			want: want{newSeen: true, emit: true, eventKind: "needs_input"},
+		},
+		{
+			name: "joined: error → event only",
+			prev: agent.StateActive, next: agent.StateError,
+			prevSeen: true, joined: true,
+			want: want{newSeen: true, emit: true, eventKind: "state_change"},
+		},
 		// === DETACHING from a needs_input: state didn't change, no event, but
 		//     seen stays false because we never auto-flip it true off-attach. ===
 		{
@@ -161,7 +177,7 @@ func TestDecideAttention(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got := decideAttention(attentionInput{
 				Prev: tc.prev, Next: tc.next, PrevSeen: tc.prevSeen, Attached: tc.attached,
-				Work: tc.work, Worked: tc.worked,
+				Work: tc.work, Worked: tc.worked, Joined: tc.joined,
 			})
 			if got.NewSeen != tc.want.newSeen {
 				t.Errorf("NewSeen = %v, want %v", got.NewSeen, tc.want.newSeen)
@@ -195,9 +211,24 @@ type tick struct {
 // does and counts bells and the pushes maybePushForStateTransition
 // would send (it only notifies needs_input and active → idle).
 func runTurns(tn *turn, attached bool, ticks []tick) (bells, pushes int) {
+	evTicks := make([]evTick, len(ticks))
+	for i, tk := range ticks {
+		evTicks[i] = evTick{tk.next, evidence{spinning: tk.spinning}}
+	}
+	return runEvidence(tn, attached, evTicks)
+}
+
+// evTick is a tick with its full evidence.
+type evTick struct {
+	next agent.State
+	ev   evidence
+}
+
+// runEvidence is runTurns for ticks with any evidence.
+func runEvidence(tn *turn, attached bool, ticks []evTick) (bells, pushes int) {
 	state, seen := agent.StateUnknown, true
 	for _, tk := range ticks {
-		d := tn.attend(state, tk.next, tk.spinning, seen, attached)
+		d := tn.attend(state, tk.next, tk.ev, seen, attached)
 		if d.RingBell {
 			bells++
 		}
@@ -210,24 +241,27 @@ func runTurns(tn *turn, attached bool, ticks []tick) (bells, pushes int) {
 }
 
 // TestDecideAttention_AttachedSuppressesPushNotBell — an attached user
-// through two turns must never receive a push (their phone doesn't need
-// to buzz while they're watching), but the bell must ring at the end of
-// each turn — BEL is delivered by tmux to attached clients only, so the
-// attached terminal is precisely who the ring is for. (The pre-fix
-// expectation of zero bells while attached, combined with
-// delivery-to-attached-only, made the bell path dead code — the PR #156
-// regression.)
+// through three turns must never receive a push (their phone doesn't
+// need to buzz while they're watching), but the bell must ring at the
+// end of each turn that ends waiting for input — BEL is delivered by
+// tmux to attached clients only, so the attached terminal is precisely
+// who the ring is for. (The pre-fix expectation of zero bells while
+// attached, combined with delivery-to-attached-only, made the bell path
+// dead code — the PR #156 regression.) A turn that ends in idle rings
+// nothing, and the prompt after it needs a turn of its own.
 func TestDecideAttention_AttachedSuppressesPushNotBell(t *testing.T) {
 	bells, pushes := runTurns(&turn{}, true, []tick{
 		{agent.StateActive, false},
 		{agent.StateActive, false},
-		{agent.StateNeedsInput, false},
+		{agent.StateNeedsInput, false}, // turn 1: bell
 		{agent.StateActive, false},
-		{agent.StateIdle, false},
-		{agent.StateNeedsInput, false},
+		{agent.StateIdle, false},       // turn 2 finishes: no bell
+		{agent.StateNeedsInput, false}, // not a turn
+		{agent.StateActive, false},
+		{agent.StateNeedsInput, false}, // turn 3: bell
 	})
 	if bells != 2 {
-		t.Errorf("attached session rang the bell %d times across the sequence; expected 2 (one per turn)", bells)
+		t.Errorf("attached session rang the bell %d times across the sequence; expected 2 (one per turn ending at a prompt)", bells)
 	}
 	if pushes != 0 {
 		t.Errorf("attached session sent %d pushes across the sequence; expected 0", pushes)
