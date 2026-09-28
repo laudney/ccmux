@@ -5,20 +5,24 @@
 // time Anthropic shipped a new model — users had to wait for a ccmux
 // release just to see the new family in the picker.
 //
-// This package replaces that with live discovery: hit Anthropic's
-// Models API when an API key is present, cache the result for 24h on
-// disk, and fall back to a curated in-binary list otherwise. The
-// daemon refreshes the cache every 24h in the background; callers
-// read the merged result via Service.Catalog.
+// This package replaces that with live discovery: ask the user's
+// `claude` CLI (`claude -p`), then Anthropic's Models API when an API
+// key is present, and fall back to a curated in-binary list otherwise
+// (see Service.Refresh). The result is cached on disk; the daemon
+// refreshes it weekly in the background (Service.MaxAge, and the
+// daemon's own weekly tick), and no two runs of the discovery chain
+// are closer than 10 minutes (Service.MinRefreshInterval), however
+// often a refresh is forced. Callers read the merged result via
+// Service.Catalog.
 //
-// Auth model: ANTHROPIC_API_KEY only. The vast majority of ccmux
-// users authenticate to Claude Code via `claude auth login` and
-// don't have an API key set — that's fine, they get the curated
-// fallback list (which ships updated with every ccmux release).
-// Users who want live discovery set ANTHROPIC_API_KEY in their
-// shell. There is no OAuth path: internal/claudeauth deliberately
-// doesn't expose tokens, and rebuilding that boundary just for
-// this feature wasn't worth the surface area.
+// Auth model: the CLI tier works for every logged-in Claude Code user —
+// subscription (`claude auth login`) or API key — since claude handles
+// its own auth. The Models API tier needs ANTHROPIC_API_KEY in the
+// daemon's environment. Without either, users get the curated
+// fallback list (which ships updated with every ccmux release). There
+// is no OAuth path of our own: internal/claudeauth deliberately
+// doesn't expose tokens, and rebuilding that boundary just for this
+// feature wasn't worth the surface area.
 package claudemodels
 
 import (
@@ -526,9 +530,12 @@ func (s *Service) Cached() Catalog {
 
 // Catalog returns the current snapshot. Reads the cache first; if
 // the cache is missing or older than MaxAge, refreshes synchronously
-// before returning. A network failure during the refresh is logged
-// (by the caller — Service doesn't import a logger) and falls back to
-// whatever's in the cache, or the curated list if nothing's cached.
+// before returning — unless a refresh is already running, which it
+// doesn't wait for: it answers from the cache (stale or not) or the
+// curated list straight away. A network failure during the refresh is
+// logged (by the caller — Service doesn't import a logger) and falls
+// back to whatever's in the cache, or the curated list if nothing's
+// cached.
 func (s *Service) Catalog(ctx context.Context) (Catalog, error) {
 	cached, err := s.cache.Read()
 	if err != nil {
@@ -539,7 +546,19 @@ func (s *Service) Catalog(ctx context.Context) (Catalog, error) {
 	if !cached.FetchedAt.IsZero() && time.Since(cached.FetchedAt) < s.MaxAge {
 		return s.withFallback(cached), nil
 	}
-	fresh, refreshErr := s.Refresh(ctx)
+	fresh, refreshErr := s.run(ctx, false)
+	if errors.Is(refreshErr, errRefreshInFlight) {
+		// Another caller's run is in progress — in the daemon, the boot
+		// refresh: a `claude -p` call that can take a minute and a half.
+		// Don't wait on it: a plain GET /v1/models with an empty cache
+		// hung until that call finished. Answer now with what the cache
+		// has, however stale, or the curated list; a later call sees
+		// the run's result.
+		if cached.FetchedAt.IsZero() {
+			cached = Catalog{Source: SourceFallback}
+		}
+		return s.withFallback(cached), nil
+	}
 	if refreshErr != nil {
 		// On ErrNoAPIKey, Refresh still produces and persists a valid
 		// fallback-source Catalog (with a real FetchedAt) — return
@@ -590,10 +609,23 @@ func (s *Service) Catalog(ctx context.Context) (Catalog, error) {
 // MinRefreshInterval of the last run returns that run's result without
 // fetching again.
 func (s *Service) Refresh(ctx context.Context) (Catalog, error) {
+	return s.run(ctx, true)
+}
+
+// errRefreshInFlight is run's answer to a caller that won't wait for a
+// run already in progress.
+var errRefreshInFlight = errors.New("claudemodels: a refresh is already running")
+
+// run is Refresh; with wait false, a call that arrives while a run is
+// in progress returns errRefreshInFlight instead of waiting for it.
+func (s *Service) run(ctx context.Context, wait bool) (Catalog, error) {
 	f := &s.flight
 	f.mu.Lock()
 	if running := f.running; running != nil {
 		f.mu.Unlock()
+		if !wait {
+			return Catalog{}, errRefreshInFlight
+		}
 		select {
 		case <-running:
 		case <-ctx.Done():

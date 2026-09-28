@@ -20,7 +20,8 @@ import (
 const modelRefreshInterval = 7 * 24 * time.Hour
 
 // modelRefreshLoop runs an immediate startup refresh, then re-fetches
-// the catalog on a 24h interval until ctx is cancelled. Runs in its
+// the catalog every modelRefreshInterval (weekly) until ctx is
+// cancelled. Runs in its
 // own goroutine so a slow API call can't stall the poll loop.
 //
 // Startup behavior: kick a refresh on boot so first-attach users
@@ -60,8 +61,11 @@ func (s *server) modelRefreshLoop(ctx context.Context) {
 
 // handleModels serves GET /v1/models — the discovered + curated
 // model catalog. ?refresh=true forces a synchronous re-fetch before
-// responding; without it the response comes from the cached catalog
-// (which Service.Catalog refreshes opportunistically when stale).
+// responding (joining one already running; bounded by the discovery
+// chain's own timeouts); without it the response comes from the cached
+// catalog, which Service.Catalog refreshes opportunistically when stale
+// — but never waiting on a refresh already in flight, such as the boot
+// refresh: a plain GET then gets the cache or the curated list at once.
 //
 // Returns claudemodels.Catalog verbatim — that's the public shape
 // integrators key off, documented in docs/02_Architecture/05_HTTP_API.md.
