@@ -11,7 +11,9 @@
 // `turn_context` records carrying the active model. We sum
 // `last_token_usage` for events inside the window and count
 // `response_item` user turns excluding the synthetic
-// `<environment_context>` injection Codex prepends on every session.
+// `<environment_context>` injection Codex prepends on every session,
+// and excluding every turn of a subagent rollout (guardian reviews,
+// spawned threads) — see IsSubagentSource.
 package codexusage
 
 import (
@@ -207,6 +209,16 @@ func emptyAggregate(window time.Duration, now time.Time) *Aggregate {
 	}
 }
 
+// tokenUsage is one usage breakdown on a token_count event: the
+// per-call last_token_usage or the cumulative total_token_usage.
+type tokenUsage struct {
+	Input     int `json:"input_tokens"`
+	Cached    int `json:"cached_input_tokens"`
+	Output    int `json:"output_tokens"`
+	Reasoning int `json:"reasoning_output_tokens"`
+	Total     int `json:"total_tokens"`
+}
+
 // scanResult bundles everything one transcript scan produces.
 type scanResult struct {
 	total       Tokens
@@ -223,12 +235,18 @@ type scanResult struct {
 //   - token_count events with last_token_usage → token totals,
 //     attributed to the most recent model seen on a turn_context
 //     record (Codex emits one per turn, before its associated
-//     token_count event).
+//     token_count event). Codex sometimes writes the same event twice
+//     in a row; an event whose cumulative total_token_usage hasn't
+//     moved since the previous one in the file reports no new API
+//     call and is skipped.
 //   - response_item records with role=user → user prompts, excluding
 //     synthetic injections whose first text block starts with
 //     "<environment_context>" (Codex prepends one per session) or
 //     other angle-bracketed system tags. This matches what a human
-//     would count as "I sent a message".
+//     would count as "I sent a message". A subagent rollout (its
+//     session_meta source is {"subagent": …}) has no human prompts at
+//     all: its "user" turns are what the parent agent sent. Its tokens
+//     are still real API usage and still count.
 //
 // Built to tolerate large lines: rollout entries can include the
 // full system-instructions blob, easily 100KB+.
@@ -241,15 +259,18 @@ func scanFile(path string, cutoff, now time.Time) scanResult {
 	defer f.Close()
 	sc := jsonl.NewScanner(f, 1<<25)
 	currentModel := "" // last model seen from a turn_context record
+	subagent := false
+	var prevTotal *tokenUsage // total_token_usage on the previous token_count event
 	for sc.Scan() {
 		line := sc.Bytes()
 		// Cheap byte-level prefilter — only json-decode lines that
-		// could possibly carry usage, a turn_context model, or a user
-		// response_item.
+		// could possibly carry usage, a turn_context model, a user
+		// response_item, or the session_meta source.
 		isTokenCount := bytes.Contains(line, []byte(`"token_count"`))
 		isTurnContext := bytes.Contains(line, []byte(`"turn_context"`))
 		isResponseItem := bytes.Contains(line, []byte(`"response_item"`))
-		if !isTokenCount && !isTurnContext && !isResponseItem {
+		isSessionMeta := bytes.Contains(line, []byte(`"session_meta"`))
+		if !isTokenCount && !isTurnContext && !isResponseItem && !isSessionMeta {
 			continue
 		}
 
@@ -265,6 +286,13 @@ func scanFile(path string, cutoff, now time.Time) scanResult {
 		inWindow := !ts.IsZero() && !ts.Before(cutoff) && !ts.After(now)
 
 		switch env.Type {
+		case "session_meta":
+			var p struct {
+				Source json.RawMessage `json:"source"`
+			}
+			if err := json.Unmarshal(env.Payload, &p); err == nil && IsSubagentSource(p.Source) {
+				subagent = true
+			}
 		case "turn_context":
 			var p struct {
 				Model string `json:"model"`
@@ -273,23 +301,26 @@ func scanFile(path string, cutoff, now time.Time) scanResult {
 				currentModel = p.Model
 			}
 		case "event_msg":
-			if !inWindow {
-				continue
-			}
 			var p struct {
 				Type string `json:"type"`
 				Info struct {
-					Last *struct {
-						Input  int `json:"input_tokens"`
-						Cached int `json:"cached_input_tokens"`
-						Output int `json:"output_tokens"`
-					} `json:"last_token_usage"`
+					Total *tokenUsage `json:"total_token_usage"`
+					Last  *tokenUsage `json:"last_token_usage"`
 				} `json:"info"`
 			}
 			if err := json.Unmarshal(env.Payload, &p); err != nil {
 				continue
 			}
 			if p.Type != "token_count" || p.Info.Last == nil {
+				continue
+			}
+			// Tracked across the whole file, not just the window, so a
+			// repeat of the last event before the cutoff is caught too.
+			repeat := p.Info.Total != nil && prevTotal != nil && *p.Info.Total == *prevTotal
+			if p.Info.Total != nil {
+				prevTotal = p.Info.Total
+			}
+			if repeat || !inWindow {
 				continue
 			}
 			tok := Tokens{Input: p.Info.Last.Input, Output: p.Info.Last.Output, Cached: p.Info.Last.Cached}
@@ -329,7 +360,30 @@ func scanFile(path string, cutoff, now time.Time) scanResult {
 			r.userPrompts++
 		}
 	}
+	if subagent {
+		r.userPrompts = 0
+	}
 	return r
+}
+
+// IsSubagentSource reports whether a rollout's session_meta
+// payload.source marks a run Codex spawned itself: the object
+// {"subagent": {"other": "guardian"} | {"thread_spawn": …}} rather than
+// the plain string ("cli", "vscode", "exec") of a session a user
+// started. Shared with internal/conversations, which hides these runs
+// from the conversation list.
+func IsSubagentSource(source json.RawMessage) bool {
+	source = bytes.TrimSpace(source)
+	if len(source) == 0 || source[0] != '{' {
+		return false
+	}
+	var src struct {
+		Subagent json.RawMessage `json:"subagent"`
+	}
+	if json.Unmarshal(source, &src) != nil {
+		return false
+	}
+	return len(src.Subagent) > 0 && string(src.Subagent) != "null"
 }
 
 // isSyntheticUserContent returns true if the first text block looks

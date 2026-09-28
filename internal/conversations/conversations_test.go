@@ -774,6 +774,35 @@ func TestResumeArgs_AgentDialects(t *testing.T) {
 	}
 }
 
+// TestResumeArgs_RejectsFlagLikeID — regression: IDs come from file
+// names, and a crafted rollout-a--b-c-d-e.jsonl yields the ID
+// "-b-c-d-e", which went straight into the agent's argv where it would
+// be parsed as flags. ValidateResume refuses it and no argv is built.
+func TestResumeArgs_RejectsFlagLikeID(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, ".codex/sessions/2026/05/12/rollout-a--b-c-d-e.jsonl")
+	writeFile(t, path, `{"timestamp":"2026-05-12T10:00:00Z","type":"session_meta","payload":{"originator":"codex-tui","cwd":"/repo"}}`+"\n")
+	got, err := ListCodex(root)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("ListCodex = %+v, %v", got, err)
+	}
+	c := got[0]
+	if c.ID != "-b-c-d-e" {
+		t.Fatalf("fixture ID = %q, want the flag-like -b-c-d-e", c.ID)
+	}
+	if err := c.ValidateResume(); err == nil {
+		t.Error("ValidateResume accepted a flag-like conversation ID")
+	}
+	for _, id := range []agent.ID{agent.IDClaude, agent.IDCodex, agent.IDCursor, agent.IDAntigravity, agent.IDGemini, agent.IDPi, agent.IDMuse} {
+		if argv := (Conversation{ID: "--dangerously-skip-permissions", Agent: id}).ResumeArgs(); argv != nil {
+			t.Errorf("%s: ResumeArgs = %v, want nil for a flag-like ID", id, argv)
+		}
+	}
+	if argv := (Conversation{ID: "a-1", Agent: agent.IDCodex}).ResumeArgs(); len(argv) == 0 {
+		t.Error("an ordinary ID must still resume")
+	}
+}
+
 func TestResumeArgsWithCommands_ConfiguredCommands(t *testing.T) {
 	commands := agent.Commands{
 		Claude:      "/tmp/claude",
@@ -950,18 +979,39 @@ func TestDelete_RemovesClaudeTranscript(t *testing.T) {
 	}
 }
 
+// TestDelete_RemovesMergedClaudeFragments — every transcript fragment
+// goes, and so does the session's own directory. Regression: Delete
+// removed only the .jsonl files and left <id>/ behind, including
+// tool-results/ (contents of files the session read), workflows/ and
+// the non-jsonl metadata under subagents/. Other sessions' directories
+// and Claude's per-project memory/ must survive.
 func TestDelete_RemovesMergedClaudeFragments(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	const id = "0f5c2a8e-1b2c-4d3e-8f90-a1b2c3d4e5f6"
 	projectDir := filepath.Join(home, ".claude/projects/-Users-skz-Projects-foo")
-	parentPath := filepath.Join(projectDir, "parent-1.jsonl")
-	subagentPath := filepath.Join(projectDir, "parent-1/subagents/agent-a123.jsonl")
+	sessionDir := filepath.Join(projectDir, id)
+	parentPath := filepath.Join(projectDir, id+".jsonl")
+	subagentPath := filepath.Join(sessionDir, "subagents/agent-a123.jsonl")
 	writeFile(t, parentPath,
 		`{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2026-04-30T10:00:00Z"}`+"\n",
 	)
 	writeFile(t, subagentPath,
 		`{"type":"assistant","message":{"role":"assistant","content":"done"},"timestamp":"2026-04-30T10:01:00Z"}`+"\n",
 	)
+	leftovers := []string{
+		filepath.Join(sessionDir, "tool-results/toolu_01.txt"),
+		filepath.Join(sessionDir, "subagents/agent-a123.meta.json"),
+		filepath.Join(sessionDir, "workflows/run.json"),
+	}
+	for _, p := range leftovers {
+		writeFile(t, p, "secret file contents")
+	}
+	otherSession := filepath.Join(projectDir, "11111111-2222-4333-8444-555555555555/tool-results/x.txt")
+	memory := filepath.Join(projectDir, "memory/MEMORY.md")
+	writeFile(t, otherSession, "keep")
+	writeFile(t, memory, "keep")
+
 	got, err := ListClaude(home)
 	if err != nil {
 		t.Fatalf("ListClaude: %v", err)
@@ -973,11 +1023,71 @@ func TestDelete_RemovesMergedClaudeFragments(t *testing.T) {
 	if err := Delete(got[0]); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	for _, path := range []string{parentPath, subagentPath} {
+	for _, path := range []string{parentPath, subagentPath, sessionDir} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Errorf("%s still exists after Delete: stat err = %v", path, err)
 		}
 	}
+	for _, path := range []string{otherSession, memory} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s was removed by an unrelated Delete: %v", path, err)
+		}
+	}
+}
+
+// TestDelete_ClaudeSessionDirGuards — the session directory is only
+// removed when it is a real directory named by a session UUID inside
+// the Claude root. An id with a path separator is refused before
+// anything is deleted, a non-UUID id ("memory") owns no directory, and
+// a symlinked session directory is left alone so its target survives.
+func TestDelete_ClaudeSessionDirGuards(t *testing.T) {
+	t.Run("separator in id", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		path := filepath.Join(home, ".claude/projects/-p/x.jsonl")
+		writeFile(t, path, "{}\n")
+		for _, id := range []string{"", "..", "a/b", `a\b`} {
+			if err := Delete(Conversation{ID: id, Agent: agent.IDClaude, Path: path}); err == nil {
+				t.Errorf("Delete with id %q should be refused", id)
+			}
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("a refused Delete must not remove the transcript: %v", err)
+		}
+	})
+	t.Run("non-uuid id", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		path := filepath.Join(home, ".claude/projects/-p/memory.jsonl")
+		memory := filepath.Join(home, ".claude/projects/-p/memory/MEMORY.md")
+		writeFile(t, path, "{}\n")
+		writeFile(t, memory, "keep")
+		if err := Delete(Conversation{ID: "memory", Agent: agent.IDClaude, Path: path}); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		if _, err := os.Stat(memory); err != nil {
+			t.Errorf("memory/ must survive: %v", err)
+		}
+	})
+	t.Run("symlinked session dir", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		const id = "0f5c2a8e-1b2c-4d3e-8f90-a1b2c3d4e5f6"
+		projectDir := filepath.Join(home, ".claude/projects/-p")
+		path := filepath.Join(projectDir, id+".jsonl")
+		writeFile(t, path, "{}\n")
+		outside := filepath.Join(home, "outside/keep.txt")
+		writeFile(t, outside, "keep")
+		if err := os.Symlink(filepath.Dir(outside), filepath.Join(projectDir, id)); err != nil {
+			t.Skipf("symlink: %v", err)
+		}
+		if err := Delete(Conversation{ID: id, Agent: agent.IDClaude, Path: path}); err != nil {
+			t.Fatalf("Delete: %v", err)
+		}
+		if _, err := os.Stat(outside); err != nil {
+			t.Errorf("symlink target must survive: %v", err)
+		}
+	})
 }
 
 // TestDelete_RemovesAntigravityPB — Antigravity transcripts are .pb
@@ -1432,5 +1542,51 @@ func TestGuardTranscriptPath_SymlinkedDirEscapes(t *testing.T) {
 	writeFile(t, legit, "{}\n")
 	if err := guardTranscriptPath(home, agent.IDClaude, legit); err != nil {
 		t.Errorf("legit transcript rejected: %v", err)
+	}
+}
+
+// TestForProject_ResolvesSymlinks — a project symlinked into the
+// projects dir has the link as its path while agents record the
+// resolved cwd; the two must match from either side. Unrelated
+// projects, relative labels and a project that shares a name don't.
+func TestForProject_ResolvesSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on windows")
+	}
+	root := t.TempDir()
+	realDir := filepath.Join(root, "external", "app")
+	other := filepath.Join(root, "external", "other")
+	for _, d := range []string{realDir, other, filepath.Join(root, "Projects")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(root, "Projects", "app")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(realDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := []Conversation{
+		{ID: "resolved", Project: resolved},
+		{ID: "via-link", Project: link},
+		{ID: "trailing-slash", Project: resolved + "/"},
+		{ID: "other", Project: other},
+		{ID: "label", Project: "app"},
+		{ID: "empty"},
+	}
+	ids := func(cs []Conversation) string {
+		var out []string
+		for _, c := range cs {
+			out = append(out, c.ID)
+		}
+		return strings.Join(out, ",")
+	}
+	for _, projectPath := range []string{link, resolved} {
+		if got := ids(ForProject(list, projectPath)); got != "resolved,via-link,trailing-slash" {
+			t.Errorf("ForProject(%s) = %s, want resolved,via-link,trailing-slash", projectPath, got)
+		}
 	}
 }

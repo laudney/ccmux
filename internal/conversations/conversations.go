@@ -45,6 +45,7 @@ import (
 	"time"
 
 	"github.com/skzv/ccmux/internal/agent"
+	"github.com/skzv/ccmux/internal/codexusage"
 	"github.com/skzv/ccmux/internal/gemini"
 	"github.com/skzv/ccmux/internal/jsonl"
 	"github.com/skzv/ccmux/internal/muse"
@@ -160,8 +161,12 @@ func (c Conversation) IsHeadless() bool {
 // ValidateResume prevents unresolved Gemini project hashes from becoming a
 // fabricated cwd (or silently resuming in ccmux's own working directory),
 // and refuses a Cursor project directory that doesn't exist — tmux
-// would quietly start the session in $HOME instead.
+// would quietly start the session in $HOME instead. It also refuses an
+// ID that starts with "-" (see ResumeArgsWithCommands).
 func (c Conversation) ValidateResume() error {
+	if strings.HasPrefix(c.ID, "-") {
+		return fmt.Errorf("conversation ID %q starts with '-' and would be read as a command-line flag; refusing to resume", c.ID)
+	}
 	if c.Agent == agent.IDGemini && !filepath.IsAbs(c.Project) {
 		return fmt.Errorf("Gemini project directory is unknown; open this project in Gemini CLI once to register its location")
 	}
@@ -180,7 +185,15 @@ func (c Conversation) ResumeArgs() []string {
 // ResumeArgsWithCommands is ResumeArgs with configured executable path
 // substitution. This keeps the flag dialect owned here while allowing
 // ccmux's setup-time command choice to propagate to resume flows.
+//
+// IDs come from transcript file names, so a crafted name can produce
+// one that starts with "-" (rollout-a--b-c-d-e.jsonl yields
+// "-b-c-d-e"), which the agent would parse as a flag. Those get no
+// argv at all.
 func (c Conversation) ResumeArgsWithCommands(commands agent.Commands) []string {
+	if strings.HasPrefix(c.ID, "-") {
+		return nil
+	}
 	switch c.Agent {
 	case agent.IDGemini:
 		return agent.ResumeArgs(agent.IDGemini, c.ID, commands)
@@ -619,6 +632,11 @@ func countGeminiMessages(path string) (int, error) {
 // always comes from our own walkers so this is belt-and-suspenders,
 // but it guarantees a hand-constructed or corrupted Conversation
 // can't be turned into an arbitrary `rm` of any file on disk.
+//
+// A Claude conversation also owns ~/.claude/projects/<enc>/<id>/,
+// which holds tool-results/ (contents of files the session read),
+// subagents/ and workflows/. That directory goes too, under the same
+// root-containment and symlink checks — see claudeSessionDirs.
 func Delete(c Conversation) error {
 	paths := transcriptPaths(c)
 	if len(paths) == 0 {
@@ -642,12 +660,71 @@ func Delete(c Conversation) error {
 			return err
 		}
 	}
+	var sessionDirs []string
+	if c.Agent == agent.IDClaude {
+		if sessionDirs, err = claudeSessionDirs(home, c.ID, paths); err != nil {
+			return err
+		}
+	}
 	for _, path := range paths {
 		if err := os.Remove(path); err != nil {
 			return fmt.Errorf("delete transcript: %w", err)
 		}
 	}
+	for _, dir := range sessionDirs {
+		if err := os.RemoveAll(dir); err != nil {
+			return fmt.Errorf("delete session directory: %w", err)
+		}
+	}
 	return nil
+}
+
+// claudeUUID matches a Claude Code session ID. Claude names a session's
+// directory after that UUID; the project directory also holds folders
+// of its own (memory/), which must never be mistaken for one.
+var claudeUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// claudeSessionDirs returns the existing ~/.claude/projects/<enc>/<id>/
+// directories that belong to conversation id, one per project
+// directory its transcript paths live in (already checked by
+// guardTranscriptPath). Refuses an empty id or one with a path
+// separator; an id that isn't a session UUID owns no directory. Each
+// directory must be a real directory (not a symlink) whose parent
+// resolves inside the Claude root.
+func claudeSessionDirs(home, id string, paths []string) ([]string, error) {
+	if id == "" || id == "." || id == ".." || strings.ContainsAny(id, `/\`) {
+		return nil, fmt.Errorf("refusing to delete session directory for conversation id %q", id)
+	}
+	if !claudeUUID.MatchString(id) {
+		return nil, nil
+	}
+	root := filepath.Join(home, ".claude", "projects")
+	seen := map[string]bool{}
+	var dirs []string
+	for _, path := range paths {
+		rel, err := filepath.Rel(root, filepath.Clean(path))
+		if err != nil {
+			continue
+		}
+		project, _, _ := strings.Cut(rel, string(filepath.Separator))
+		if project == "" || project == "." || project == ".." {
+			continue
+		}
+		dir := filepath.Join(root, project, id)
+		if seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		info, err := os.Lstat(dir)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		if err := guardResolvedParent(root, dir); err != nil {
+			return nil, err
+		}
+		dirs = append(dirs, dir)
+	}
+	return dirs, nil
 }
 
 // guardTranscriptPath returns nil only when path is a plausible
@@ -1252,15 +1329,10 @@ type codexEventPayload struct {
 }
 
 // isSubagent reports whether payload.source is the {"subagent": …}
-// object Codex writes for guardian reviews and spawned threads.
+// object Codex writes for guardian reviews and spawned threads. The
+// usage walker applies the same rule to prompt counts.
 func (p codexEventPayload) isSubagent() bool {
-	var src struct {
-		Subagent json.RawMessage `json:"subagent"`
-	}
-	if len(p.Source) == 0 || p.Source[0] != '{' || json.Unmarshal(p.Source, &src) != nil {
-		return false
-	}
-	return len(src.Subagent) > 0 && string(src.Subagent) != "null"
+	return codexusage.IsSubagentSource(p.Source)
 }
 
 func (e codexEvent) Metadata() codexEventPayload {
@@ -1927,7 +1999,9 @@ func compactTranscriptPaths(primary string, paths []string) []string {
 //   - Drop "pure-noise" blocks entirely (open tag + content + close).
 //     environment_context / user_instructions are state dumps the CLI
 //     prepends to every session; surfacing them as a "first prompt"
-//     would just show cwd / shell info.
+//     would just show cwd / shell info. task-notification is the
+//     record Claude Code injects as a user turn when a background task
+//     or subagent finishes.
 //   - Drop leading Codex AGENTS.md instruction bundles that are
 //     persisted as user input before the real prompt.
 //   - Drop Claude Code's slash-command bookkeeping: <command-name>,
@@ -1941,6 +2015,10 @@ func compactTranscriptPaths(primary string, paths []string) []string {
 //   - Drop leading skill-invocation wrappers such as
 //     "worktree-openspec-workflow\n/worktree-openspec-workflow …" and
 //     keep only the prompt text after the command token.
+//   - Drop Claude Code's "[Request interrupted by user]" markers.
+//
+// internal/claudeusage excludes the same task-notification and
+// interrupt records from its prompt count (promptKindOf).
 //
 // Returns "" when the input is empty after cleaning — callers should
 // treat that as "skip this message" and continue scanning the
@@ -1954,7 +2032,7 @@ func cleanPromptText(s string) string {
 	if s == "" {
 		return ""
 	}
-	for _, tag := range []string{"environment_context", "user_instructions"} {
+	for _, tag := range []string{"environment_context", "user_instructions", "task-notification"} {
 		s = removeXMLBlock(s, tag)
 	}
 	s = strings.TrimSpace(dropCommandBlocks(s))
@@ -1962,7 +2040,20 @@ func cleanPromptText(s string) string {
 		return ""
 	}
 	s = strings.TrimSpace(stripXMLTags(s))
-	return stripLeadingSkillInvocation(s)
+	s = stripLeadingSkillInvocation(s)
+	if isInterruptMarker(s) {
+		return ""
+	}
+	return s
+}
+
+// isInterruptMarker reports whether s is the whole of a record Claude
+// Code writes when the user interrupts a turn: "[Request interrupted by
+// user]" or "[Request interrupted by user for tool use]". A prompt that
+// merely quotes one is kept.
+func isInterruptMarker(s string) bool {
+	return strings.HasPrefix(s, "[Request interrupted by user") &&
+		strings.HasSuffix(s, "]") && !strings.ContainsRune(s, '\n')
 }
 
 func removeLeadingAgentsInstructions(s string) string {
@@ -2227,6 +2318,35 @@ func truncatedPreview(s string) string {
 	runes := []rune(out)
 	if len(runes) > maxLen {
 		out = string(runes[:maxLen-1]) + "…"
+	}
+	return out
+}
+
+// ForProject returns the conversations in list that ran in projectPath,
+// in list order. Both sides are compared after resolving symlinks: a
+// project reached through a link (~/Projects/app → /Volumes/ext/app)
+// has the link as its path, while agents record the resolved working
+// directory. Each distinct path is resolved once per call, however
+// many conversations share it.
+func ForProject(list []Conversation, projectPath string) []Conversation {
+	resolved := map[string]string{}
+	resolve := func(p string) string {
+		if r, ok := resolved[p]; ok {
+			return r
+		}
+		r := filepath.Clean(p)
+		if real, err := filepath.EvalSymlinks(p); err == nil {
+			r = real
+		}
+		resolved[p] = r
+		return r
+	}
+	want := resolve(projectPath)
+	var out []Conversation
+	for _, c := range list {
+		if c.Project == projectPath || (filepath.IsAbs(c.Project) && resolve(c.Project) == want) {
+			out = append(out, c)
+		}
 	}
 	return out
 }

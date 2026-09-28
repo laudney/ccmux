@@ -84,14 +84,22 @@ type ProjectTotal struct {
 }
 
 // TopProjects returns up to `n` projects sorted by total token usage
-// descending.
+// descending, ties broken by project name so the dashboard's rows
+// don't swap places between refreshes. Projects with no tokens (a
+// prompt still waiting for its first response) are left out.
 func (a *Aggregate) TopProjects(n int) []ProjectTotal {
 	out := make([]ProjectTotal, 0, len(a.ByProject))
 	for proj, t := range a.ByProject {
+		if t.Total() == 0 {
+			continue
+		}
 		out = append(out, ProjectTotal{Project: proj, Tokens: *t})
 	}
 	sort.Slice(out, func(i, j int) bool {
-		return out[i].Tokens.Total() > out[j].Tokens.Total()
+		if ti, tj := out[i].Tokens.Total(), out[j].Tokens.Total(); ti != tj {
+			return ti > tj
+		}
+		return out[i].Project < out[j].Project
 	})
 	if n > 0 && len(out) > n {
 		out = out[:n]
@@ -189,9 +197,11 @@ func priceFor(model string) price {
 // familyVersion extracts the model version around a family name:
 // "claude-opus-4-5-20251101" → 4.5, "claude-opus-5" → 5,
 // "claude-3-5-haiku-20241022" → 3.5, "claude-3-opus" → 3. Returns 0
-// when no version is present. Date suffixes (8 digits) are ignored.
+// when no version is present. Date suffixes (8 digits) are ignored,
+// including Vertex AI's "@" form ("claude-opus-4-5@20251101"); Bedrock
+// ids ("us.anthropic.claude-opus-4-5-20251101-v1:0") parse as-is.
 func familyVersion(m, family string) float64 {
-	parts := strings.Split(m, "-")
+	parts := strings.FieldsFunc(m, func(r rune) bool { return r == '-' || r == '@' })
 	idx := -1
 	for i, p := range parts {
 		if p == family {
@@ -404,12 +414,16 @@ func walk(now time.Time, d time.Duration, block bool) (*Aggregate, error) {
 		agg.Total.Add(r.total)
 		agg.Messages += r.assistantCount
 		agg.UserPrompts += r.userPrompts
-		proj := agg.ByProject[fe.proj]
-		if proj == nil {
-			proj = &Tokens{}
-			agg.ByProject[fe.proj] = proj
+		// A file with prompts but no response yet has no tokens to
+		// attribute; a row for it would read "0" in the breakdown.
+		if r.total.Total() > 0 {
+			proj := agg.ByProject[fe.proj]
+			if proj == nil {
+				proj = &Tokens{}
+				agg.ByProject[fe.proj] = proj
+			}
+			proj.Add(r.total)
 		}
-		proj.Add(r.total)
 		for model, t := range r.byModel {
 			mt := agg.ByModel[model]
 			if mt == nil {

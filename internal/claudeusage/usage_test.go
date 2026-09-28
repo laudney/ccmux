@@ -46,6 +46,27 @@ func TestPriceFor_ByFamilyAndVersion(t *testing.T) {
 		{"claude-fable-5-1", 10, 50, 0.25},
 		{"some-future-model", 3, 15, 0.3}, // priced as Sonnet 4.6
 		{"", 3, 15, 0.3},
+		// Vertex AI ids date-stamp with '@'. Regression: splitting on '-'
+		// alone read "4-5@20251101" as Opus 4 ($15/$75) and lost the
+		// Haiku version entirely.
+		{"claude-opus-4-5@20251101", 5, 25, 0.5},
+		{"claude-opus-4-1@20250805", 15, 75, 1.5},
+		{"claude-opus-4@20250514", 15, 75, 1.5},
+		{"claude-opus-5-5@20260101", 4, 20, 0.2},
+		{"claude-3-5-haiku@20241022", 0.8, 4, 0.08},
+		{"claude-3-haiku@20240307", 0.25, 1.25, 0.025},
+		{"claude-haiku-4-5@20251001", 1, 5, 0.1},
+		{"claude-sonnet-4-5@20250929", 3, 15, 0.3},
+		{"claude-3-7-sonnet@20250219", 3, 15, 0.3},
+		{"claude-fable-5-1@20260101", 10, 50, 0.25},
+		// Bedrock ids: provider prefix, optional region prefix, -v1:0.
+		{"anthropic.claude-opus-4-5-20251101-v1:0", 5, 25, 0.5},
+		{"us.anthropic.claude-opus-4-1-20250805-v1:0", 15, 75, 1.5},
+		{"anthropic.claude-opus-4-6-v1", 5, 25, 0.5},
+		{"anthropic.claude-3-5-haiku-20241022-v1:0", 0.8, 4, 0.08},
+		{"anthropic.claude-3-haiku-20240307-v1:0", 0.25, 1.25, 0.025},
+		{"global.anthropic.claude-haiku-4-5-20251001-v1:0", 1, 5, 0.1},
+		{"anthropic.claude-3-opus-20240229-v1:0", 15, 75, 1.5},
 	}
 	near := func(a, b float64) bool { return a-b < 1e-9 && b-a < 1e-9 }
 	for _, tc := range cases {
@@ -626,6 +647,75 @@ func TestTopProjects_OrdersByTotalDesc(t *testing.T) {
 	all := agg.TopProjects(0)
 	if len(all) != 3 {
 		t.Errorf("n=0 should return all, got %d", len(all))
+	}
+}
+
+// TestTopProjects_DropsZeroRowsAndBreaksTiesByName — regression: a
+// project whose only file had a prompt but no response yet showed as a
+// 0-token row, and projects with equal totals came out of a map in
+// random order through an unstable sort, so the dashboard rows swapped
+// places on every refresh.
+func TestTopProjects_DropsZeroRowsAndBreaksTiesByName(t *testing.T) {
+	agg := &Aggregate{ByProject: map[string]*Tokens{
+		"pending": {},
+		"delta":   {Input: 50},
+		"charlie": {Input: 50},
+		"alpha":   {Input: 50},
+		"bravo":   {Output: 50},
+		"top":     {Input: 500},
+	}}
+	want := []string{"top", "alpha", "bravo", "charlie", "delta"}
+	for i := 0; i < 50; i++ {
+		got := agg.TopProjects(0)
+		names := make([]string, len(got))
+		for j, p := range got {
+			names[j] = p.Project
+		}
+		if strings.Join(names, ",") != strings.Join(want, ",") {
+			t.Fatalf("TopProjects order = %v, want %v", names, want)
+		}
+	}
+}
+
+// TestWalk_PromptWithoutResponseAddsNoProjectRow — the walker itself
+// must not create a zero-token ByProject entry for a file that so far
+// holds only a prompt.
+func TestWalk_PromptWithoutResponseAddsNoProjectRow(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	ts := time.Now().Add(-10 * time.Minute).Format(time.RFC3339)
+	write := func(project string, lines ...map[string]any) {
+		dir := filepath.Join(home, ".claude", "projects", project)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.Create(filepath.Join(dir, "s.jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		for _, l := range lines {
+			writeJSONL(t, f, l)
+		}
+	}
+	write("-w-answered",
+		map[string]any{"type": "user", "timestamp": ts, "cwd": "/w/answered", "message": map[string]any{"content": "hi"}},
+		map[string]any{"type": "assistant", "timestamp": ts, "message": map[string]any{
+			"model": "claude-sonnet-4-6", "usage": map[string]any{"input_tokens": 10, "output_tokens": 5},
+		}},
+	)
+	write("-w-waiting",
+		map[string]any{"type": "user", "timestamp": ts, "cwd": "/w/waiting", "message": map[string]any{"content": "still thinking"}},
+	)
+	agg, err := WalkRolling(5 * time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agg.UserPrompts != 2 {
+		t.Errorf("UserPrompts = %d, want 2 (the waiting prompt still counts)", agg.UserPrompts)
+	}
+	if _, ok := agg.ByProject["waiting"]; ok || len(agg.ByProject) != 1 {
+		t.Errorf("ByProject = %v, want only the answered project", agg.ByProject)
 	}
 }
 

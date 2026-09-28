@@ -256,3 +256,112 @@ func TestPriceFor_MatchOrder(t *testing.T) {
 		}
 	}
 }
+
+// TestWalkRoot_SubagentRolloutHasNoPrompts — regression: a guardian
+// review or thread_spawn rollout (session_meta source {"subagent": …})
+// had every "user" message the parent agent sent it counted as a human
+// prompt. On real data these outnumbered the user's own prompts, so the
+// dashboard's Codex prompt count was inflated several times over. The
+// subagent's tokens are real API usage and still count.
+func TestWalkRoot_SubagentRolloutHasNoPrompts(t *testing.T) {
+	root := t.TempDir()
+	now := time.Date(2026, 5, 12, 23, 30, 0, 0, time.UTC)
+	ts := func(min int) string {
+		return now.Add(time.Duration(-min) * time.Minute).Format(time.RFC3339Nano)
+	}
+	meta := func(id, source string) string {
+		return fmt.Sprintf(`{"timestamp":"%s","type":"session_meta","payload":{"id":"%s","cwd":"/x","originator":"codex-tui","source":%s}}`, ts(30), id, source)
+	}
+	fixtureRollout(t, root, "user",
+		meta("user", `"cli"`),
+		turnContextLine(ts(30), "gpt-5"),
+		userMessageLine(ts(29), "fix the flaky test"),
+		tokenCountLine(ts(28), 1000, 0, 100),
+	)
+	fixtureRollout(t, root, "guardian",
+		meta("guardian", `{"subagent":{"other":"guardian"}}`),
+		turnContextLine(ts(27), "gpt-5"),
+		userMessageLine(ts(27), "Review this command before it runs"),
+		userMessageLine(ts(26), "The command is: rm -rf build"),
+		tokenCountLine(ts(25), 400, 0, 40),
+	)
+	fixtureRollout(t, root, "spawn",
+		meta("spawn", `{"subagent":{"thread_spawn":{"parent_thread_id":"p","depth":1}}}`),
+		turnContextLine(ts(24), "gpt-5"),
+		userMessageLine(ts(24), "Investigate the parser"),
+		tokenCountLine(ts(23), 200, 0, 20),
+	)
+
+	agg, err := walkRoot(root, 5*time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := agg.UserPrompts, 1; got != want {
+		t.Errorf("UserPrompts = %d, want %d (subagent turns are not human prompts)", got, want)
+	}
+	if got, want := agg.Total.Input, 1600; got != want {
+		t.Errorf("Total.Input = %d, want %d (subagent tokens still count)", got, want)
+	}
+	if got, want := agg.Messages, 3; got != want {
+		t.Errorf("Messages = %d, want %d", got, want)
+	}
+}
+
+// TestWalkRoot_RepeatedTokenCountCountedOnce — regression: Codex
+// sometimes writes the same token_count event twice in a row (same
+// total_token_usage, same last_token_usage), and each copy was summed,
+// double-counting that API call. An event whose cumulative total hasn't
+// moved is skipped, including when the copy it repeats sits just
+// before the window.
+func TestWalkRoot_RepeatedTokenCountCountedOnce(t *testing.T) {
+	root := t.TempDir()
+	now := time.Date(2026, 5, 12, 23, 30, 0, 0, time.UTC)
+	ts := func(min int) string {
+		return now.Add(time.Duration(-min) * time.Minute).Format(time.RFC3339Nano)
+	}
+	event := func(ts string, totalIn, totalOut, lastIn, lastOut int) string {
+		return fmt.Sprintf(`{"timestamp":"%s","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":%d,"cached_input_tokens":0,"output_tokens":%d,"reasoning_output_tokens":0,"total_tokens":%d},"last_token_usage":{"input_tokens":%d,"cached_input_tokens":0,"output_tokens":%d,"reasoning_output_tokens":0,"total_tokens":%d}}}}`,
+			ts, totalIn, totalOut, totalIn+totalOut, lastIn, lastOut, lastIn+lastOut)
+	}
+	fixtureRollout(t, root, "repeat",
+		turnContextLine(ts(400), "gpt-5"),
+		event(ts(400), 50, 5, 50, 5), // before the 5h window
+		event(ts(30), 50, 5, 50, 5),  // repeat of the pre-window event
+		event(ts(20), 1050, 105, 1000, 100),
+		event(ts(20), 1050, 105, 1000, 100), // re-emitted copy
+		event(ts(10), 1550, 155, 500, 50),
+	)
+	agg, err := walkRoot(root, 5*time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := agg.Total.Input, 1500; got != want {
+		t.Errorf("Total.Input = %d, want %d (a repeated event must count once)", got, want)
+	}
+	if got, want := agg.Total.Output, 150; got != want {
+		t.Errorf("Total.Output = %d, want %d", got, want)
+	}
+	if got, want := agg.Messages, 2; got != want {
+		t.Errorf("Messages = %d, want %d", got, want)
+	}
+}
+
+func TestIsSubagentSource(t *testing.T) {
+	for raw, want := range map[string]bool{
+		``:                                  false,
+		`"cli"`:                             false,
+		`"vscode"`:                          false,
+		`"exec"`:                            false,
+		`null`:                              false,
+		`{}`:                                false,
+		`{"subagent":null}`:                 false,
+		`{"subagent":{"other":"guardian"}}`: true,
+		`{"subagent":{"thread_spawn":{}}}`:  true,
+		`{"subagent":"review"}`:             true,
+		`{"subagent":`:                      false,
+	} {
+		if got := IsSubagentSource([]byte(raw)); got != want {
+			t.Errorf("IsSubagentSource(%s) = %v, want %v", raw, got, want)
+		}
+	}
+}
