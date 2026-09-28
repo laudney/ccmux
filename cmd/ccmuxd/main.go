@@ -86,15 +86,24 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) error {
 // the handler either. On failure the deadline stays armed: the server
 // drains the unread body before replying, and a stalled client would
 // otherwise hold that drain open forever.
+//
+// The tail may only be whitespace: a second value or trailing garbage
+// ({"name":"a"}{"name":"b"}, {} x) is a malformed body, not a valid one
+// with noise to ignore.
 func decodeJSONBodyWithin(w http.ResponseWriter, r *http.Request, v any, d time.Duration) error {
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Now().Add(d))
 	body := http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
-	if err := json.NewDecoder(body).Decode(v); err != nil {
+	dec := json.NewDecoder(body)
+	if err := dec.Decode(v); err != nil {
 		return err
 	}
-	if _, err := io.Copy(io.Discard, body); err != nil {
+	tail, err := io.ReadAll(io.MultiReader(dec.Buffered(), body))
+	if err != nil {
 		return err
+	}
+	if strings.Trim(string(tail), " \t\r\n") != "" {
+		return errors.New("unexpected data after the JSON value")
 	}
 	_ = rc.SetReadDeadline(time.Time{})
 	return nil
@@ -127,7 +136,9 @@ func main() {
 
 // applyDaemonDefaults fills in poll settings that are unset or make no
 // sense. A negative poll_interval_seconds used to reach time.NewTicker,
-// which panics on a non-positive interval, crash-looping the daemon.
+// which panics on a non-positive interval, crash-looping the daemon —
+// and so did a huge one (10000000000 overflows once multiplied by
+// time.Second), hence the upper clamp.
 func applyDaemonDefaults(d *config.DaemonConfig) {
 	if d.PollIntervalSeconds <= 0 {
 		d.PollIntervalSeconds = 2
@@ -135,10 +146,29 @@ func applyDaemonDefaults(d *config.DaemonConfig) {
 	if d.IdleSecondsForNeedsInput <= 0 {
 		d.IdleSecondsForNeedsInput = 3
 	}
+	d.PollIntervalSeconds = min(d.PollIntervalSeconds, maxDaemonSeconds)
+	d.IdleSecondsForNeedsInput = min(d.IdleSecondsForNeedsInput, maxDaemonSeconds)
+}
+
+// maxDaemonSeconds caps the poll interval and the needs-input idle
+// threshold: an hour is already far past any useful value.
+const maxDaemonSeconds = 3600
+
+// loadConfig reads config.toml for the daemon. A file that can't be
+// read or parsed is logged and replaced by the defaults: it used to be
+// dropped silently, taking the user's sleep mode, notifications, push
+// settings and projects root with it and leaving no trace why.
+func loadConfig() config.Config {
+	cfg, err := config.Load()
+	if err != nil {
+		log.Printf("ccmuxd: ignoring config (%v); running with the default settings until it's fixed and ccmuxd restarts", err)
+		cfg = config.Defaults()
+	}
+	return cfg
 }
 
 func run() error {
-	cfg, _ := config.Load()
+	cfg := loadConfig()
 	applyDaemonDefaults(&cfg.Daemon)
 
 	srv := newServer(cfg)
@@ -256,11 +286,30 @@ func run() error {
 	stopTailnet()
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer shutCancel()
-	if tailnetSrv != nil {
-		_ = tailnetSrv.Shutdown(shutCtx)
-	}
-	_ = httpSrv.Shutdown(shutCtx)
+	srv.shutdownHTTP(shutCtx, tailnetSrv, httpSrv)
 	return nil
+}
+
+// shutdownHTTP gracefully stops the HTTP servers (nil entries are
+// skipped). The event streams are ended first: Shutdown waits for every
+// in-flight handler, and an SSE handler only returns when its client
+// goes away, so any connected client used to hold SIGTERM for the whole
+// shutdown timeout.
+func (s *server) shutdownHTTP(ctx context.Context, servers ...*http.Server) {
+	s.stopEventStreams()
+	for _, hs := range servers {
+		if hs != nil {
+			_ = hs.Shutdown(ctx)
+		}
+	}
+}
+
+// stopEventStreams ends every /v1/events stream, now and for any that
+// open later. Idempotent.
+func (s *server) stopEventStreams() {
+	if s.streamsDone != nil {
+		s.stopStreams.Do(func() { close(s.streamsDone) })
+	}
 }
 
 // startBackground starts everything with a side effect outside this
@@ -444,6 +493,10 @@ type server struct {
 
 	tokens *daemon.TokenStore
 	events *daemon.EventBus
+	// streamsDone is closed (once, via stopEventStreams) when the daemon
+	// shuts down, ending the long-lived /v1/events handlers.
+	streamsDone chan struct{}
+	stopStreams sync.Once
 
 	// tailnetLive is true while the tailnet HTTP listener is serving.
 	tailnetLive atomic.Bool
@@ -509,6 +562,9 @@ type server struct {
 	has    func(ctx context.Context, name string) (bool, error)
 	kill   func(ctx context.Context, name string) error
 	rename func(ctx context.Context, oldName, newName string) error
+	// startGrace is how long the create handlers watch a new session
+	// for an immediate exit (confirmStarted). Zero skips the check.
+	startGrace time.Duration
 
 	// pollBudget bounds one whole pollOnce tick (tmux.List + every
 	// capture-pane/display-message + the bell path). Without it a
@@ -593,8 +649,10 @@ func newServer(cfg config.Config) *server {
 		has:             tmux.Has,
 		kill:            tmux.Kill,
 		rename:          tmux.Rename,
+		startGrace:      defaultStartGrace,
 		tokens:          daemon.NewTokenStore(),
 		events:          daemon.NewEventBus(),
+		streamsDone:     make(chan struct{}),
 		devices:         devices,
 		apnsSender:      sender,
 		fcmSender:       fcmSender,
@@ -654,6 +712,10 @@ func (s *server) localOnlyRoutes(mux *http.ServeMux) {
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	host, _ := os.Hostname()
 	s.mu.Lock()
 	n := len(s.seen)
@@ -689,7 +751,8 @@ func (s *server) listSessions(w http.ResponseWriter, r *http.Request) {
 	// server) and hiding it made the dashboard silently empty.
 	tss, err := s.list(ctx)
 	if err != nil {
-		http.Error(w, "tmux list-sessions: "+err.Error(), http.StatusInternalServerError)
+		// tmux.List's error already names the command.
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -725,10 +788,17 @@ func (s *server) listSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-// createSession handles POST /v1/sessions: scaffold or attach to a
-// project's tmux session running Claude. Idempotent — if the named
-// tmux session already exists, returns it without creating a new one.
-// The request body is daemon.NewSessionRequest.
+// createSession handles POST /v1/sessions: start or attach to a
+// project's tmux session running its agent. The request body is
+// daemon.NewSessionRequest.
+//
+// Idempotent on the session name: when the named session already runs
+// in the requested directory, it is returned as it is (its real state,
+// agent and path) and nothing is started. When it runs somewhere else
+// the request is a name collision and gets 409 — answering 200 with the
+// request's project and path described a session that didn't exist,
+// and re-chroming it with that project relabelled someone else's
+// session. See existingSession.
 func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 	var req daemon.NewSessionRequest
 	if err := decodeJSONBody(w, r, &req); err != nil {
@@ -737,6 +807,11 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Project == "" {
 		http.Error(w, "project required", http.StatusBadRequest)
+		return
+	}
+	requested, err := requestAgent(req.Agent)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	// An explicit path gets the same "~/" expansion bare sessions do
@@ -751,8 +826,7 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 		}
 		path = filepath.Join(project.ResolveRoot(s.cfg.Projects.Root), req.Project)
 	}
-	if _, err := os.Stat(path); err != nil {
-		http.Error(w, "project path not found: "+path, http.StatusNotFound)
+	if !requireDir(w, path, "project path") {
 		return
 	}
 
@@ -772,46 +846,172 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	exists, herr := s.has(ctx, session)
-	if herr != nil {
-		http.Error(w, "tmux has-session: "+herr.Error(), http.StatusInternalServerError)
+	if st, done := s.existingSession(ctx, w, session, path); done {
+		if st != nil {
+			writeJSON(w, st)
+		}
 		return
 	}
-	if !exists {
-		// Caller-supplied agent persists to .ccmux/agent so the launch
-		// command (read via project.ReadAgent) and future attaches all
-		// pick the same one. Invalid agent strings are ignored — the
-		// sidecar then keeps its current value (or stays unset →
-		// Claude). Only when starting a session: rewriting it for one
-		// that is already running would make the poll loop judge that
-		// running agent by another agent's rules.
-		if a := strings.TrimSpace(req.Agent); a != "" {
-			if id, ok := agent.ParseID(a); ok {
-				if err := project.SetAgent(path, id); err != nil {
-					log.Printf("ccmuxd: set agent for %s: %v", path, err)
-				}
-			}
-		}
-		// Launch the agent recorded in the project's sidecar (or the
-		// one the request explicitly named). This used to hardcode
-		// "claude --continue || claude || zsh" regardless, which
-		// meant Codex / Antigravity projects launched claude from
-		// remote starts.
-		launch := projectLaunchCmd(path, req.Continue, s.freshCommands())
-		if err := tmux.New(ctx, session, path, launch); err != nil {
-			http.Error(w, "tmux new-session: "+err.Error(), http.StatusInternalServerError)
-			return
+	// Launch the agent the request names, else the one recorded in the
+	// project's sidecar. This used to hardcode "claude --continue ||
+	// claude || zsh" regardless, which meant Codex / Antigravity
+	// projects launched claude from remote starts. The session is tagged
+	// with it in the creating tmux call, so the poll loop classifies
+	// what actually runs whatever the sidecar says.
+	launched, launch := projectLaunchCmd(path, requested, req.Continue, s.freshCommands())
+	if err := tmux.NewWithAgent(ctx, session, path, launch, string(launched)); err != nil {
+		http.Error(w, "tmux new-session: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !s.confirmStarted(ctx, w, session, agent.ByID(launched).Binary()) {
+		return
+	}
+	// A requested agent persists to .ccmux/agent so future attaches pick
+	// the same one — only once it has started (a failed start mustn't
+	// switch the project), and only when starting a session: rewriting
+	// it for one already running would make the poll loop judge that
+	// running agent by another agent's rules.
+	if requested != "" {
+		if err := project.SetAgent(path, requested); err != nil {
+			log.Printf("ccmuxd: set agent for %s: %v", path, err)
 		}
 	}
-	// Apply chrome on every reachable-via-remote session, whether we
-	// just created it or it's a known one being re-attached. Idempotent
-	// — re-running set-option just overwrites the same string.
+	// Chrome the new session so a client ssh-attaching lands in a
+	// ccmux-styled bar.
 	s.applyChrome(ctx, session, req.Project)
 
 	writeJSON(w, daemon.SessionState{
 		Name: session, Host: "local", Project: req.Project, Path: path,
 		State: string(agent.StateUnknown), Created: time.Now(),
+		Agent: string(launched),
+		// What GET /v1/sessions reports for a session nobody has had a
+		// chance to miss anything in yet.
+		Seen: true,
 	})
+}
+
+// requireDir checks that path is an existing directory, answering 404
+// (missing) or 400 (not a directory) otherwise. A file path such as
+// /etc/passwd used to be accepted: 200 with that path while tmux
+// started the pane in $HOME.
+func requireDir(w http.ResponseWriter, path, what string) bool {
+	fi, err := os.Stat(path)
+	if err != nil {
+		http.Error(w, what+" not found: "+path, http.StatusNotFound)
+		return false
+	}
+	if !fi.IsDir() {
+		http.Error(w, what+" is not a directory: "+path, http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+// existingSession handles a create request whose session name may
+// already be taken. done=false: no such session, go ahead and create
+// it. done=true with a state: it exists in dir, so the create is a
+// no-op and that state is the answer. done=true without one: the
+// response (500 on a tmux failure, 409 when the session runs in a
+// different directory) has been written. dir "" accepts any directory.
+func (s *server) existingSession(ctx context.Context, w http.ResponseWriter, name, dir string) (st *daemon.SessionState, done bool) {
+	ts, exists, err := s.lookupSession(ctx, name)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return nil, true
+	}
+	if !exists {
+		return nil, false
+	}
+	if dir != "" && !samePath(ts.Path, dir) {
+		http.Error(w, fmt.Sprintf("session %q already exists in %s", name, ts.Path), http.StatusConflict)
+		return nil, true
+	}
+	// Re-chrome it (sessions started outside the daemon have none), but
+	// with the label of the directory it really runs in.
+	s.applyChrome(ctx, name, filepath.Base(ts.Path))
+	state := s.liveSessionState(ts)
+	return &state, true
+}
+
+// lookupSession finds a session by exact name in the tmux session list.
+func (s *server) lookupSession(ctx context.Context, name string) (tmux.Session, bool, error) {
+	list := s.list
+	if list == nil {
+		list = tmux.List
+	}
+	sessions, err := list(ctx)
+	if err != nil {
+		return tmux.Session{}, false, err
+	}
+	for _, ts := range sessions {
+		if ts.Name == name {
+			return ts, true, nil
+		}
+	}
+	return tmux.Session{}, false, nil
+}
+
+// liveSessionState is the wire view of a live session: tmux's metadata
+// plus the daemon's tracked state, as GET /v1/sessions reports it.
+func (s *server) liveSessionState(ts tmux.Session) daemon.SessionState {
+	s.mu.Lock()
+	st := s.trackedStateLocked(ts.Name)
+	s.mu.Unlock()
+	st.Path = ts.Path
+	st.Project = filepath.Base(ts.Path)
+	st.Attached = ts.Attached
+	st.Windows = ts.Windows
+	st.Created = ts.Created
+	if st.Agent == "" {
+		st.Agent = string(s.sessionAgent(ts))
+	}
+	return st
+}
+
+// samePath reports whether two directory paths name the same directory
+// (tmux records a session's start directory as it was given).
+func samePath(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	return errA == nil && errB == nil && ra == rb
+}
+
+// defaultStartGrace is how long a create handler watches a session it
+// just started before answering. An agent that isn't installed exits at
+// once, tmux closes its only pane and the session with it, and the
+// handler used to answer 200 for a session that was already gone.
+const defaultStartGrace = 300 * time.Millisecond
+
+// confirmStarted watches a just-created session for s.startGrace and
+// answers 502 when it has already exited. A has-session failure isn't
+// proof of anything, so it lets the create stand.
+func (s *server) confirmStarted(ctx context.Context, w http.ResponseWriter, name, what string) bool {
+	if s.startGrace <= 0 {
+		return true
+	}
+	has := s.has
+	if has == nil {
+		has = tmux.Has
+	}
+	deadline := time.Now().Add(s.startGrace)
+	for {
+		alive, err := has(ctx, name)
+		if err == nil && !alive {
+			http.Error(w, fmt.Sprintf("session %q exited immediately after starting — is %s installed and working on this host?", name, what), http.StatusBadGateway)
+			return false
+		}
+		if err != nil || !time.Now().Before(deadline) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return true
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 // createBareSession handles POST /v1/sessions/bare — a shell-only
@@ -825,8 +1025,13 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 // machine in that machine's home".
 //
 // Idempotent: if `Name` already exists as a tmux session, return it
-// without re-creating. Catches the case where the form's auto-
-// generated name happens to collide with a leftover.
+// (with the directory it really runs in) without re-creating — unless
+// the request names a different directory, which is a name collision
+// (409), the same rule createSession applies.
+//
+// The agent is "shell", a known agent id, or empty (the configured
+// default); anything else is refused rather than silently falling back
+// to the default agent.
 func (s *server) createBareSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -837,9 +1042,14 @@ func (s *server) createBareSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "decode: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if !strings.EqualFold(strings.TrimSpace(req.Agent), tmux.ShellAgentTag) {
+		if _, err := requestAgent(req.Agent); err != nil {
+			http.Error(w, err.Error()+` (want "shell" or an agent id)`, http.StatusBadRequest)
+			return
+		}
+	}
 	path := resolveBarePath(req.Path, s.cfg.Sessions.DefaultDir)
-	if _, err := os.Stat(path); err != nil {
-		http.Error(w, "path not found on this host: "+path, http.StatusNotFound)
+	if !requireDir(w, path, "path on this host") {
 		return
 	}
 	name := strings.TrimSpace(req.Name)
@@ -860,26 +1070,39 @@ func (s *server) createBareSession(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	exists, herr := s.has(ctx, name)
-	if herr != nil {
-		http.Error(w, "tmux has-session: "+herr.Error(), http.StatusInternalServerError)
+	host, _ := os.Hostname()
+	// Only an explicit path can conflict: without one, any existing
+	// session of that name is the one asked for.
+	wantDir := ""
+	if strings.TrimSpace(req.Path) != "" {
+		wantDir = path
+	}
+	if st, done := s.existingSession(ctx, w, name, wantDir); done {
+		if st != nil {
+			writeJSON(w, daemon.NewBareSessionResponse{Session: name, Path: st.Path, Host: host})
+		}
 		return
 	}
-	if !exists {
-		// Order: explicit request agent → daemon's
-		// sessions.default_agent → $SHELL. Bare sessions don't carry
-		// --continue because they're not tied to a project transcript.
-		launch := bareSessionLaunchCmd(req.Agent, s.cfg.Agents.Default, s.freshCommands())
-		// Tag what actually runs there, in the same tmux call that
-		// creates the session. A bare session has no project sidecar,
-		// so untagged the poll loop assumed Claude — a plain shell
-		// prompt then read as "Claude crashed" (error) — and a tick
-		// landing between two separate calls did exactly that.
-		tag := bareSessionAgentTag(req.Agent, s.cfg.Agents.Default)
-		if err := tmux.NewWithAgent(ctx, name, path, launch, tag); err != nil {
-			http.Error(w, "tmux new-session: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
+	// Order: explicit request agent → daemon's
+	// sessions.default_agent → $SHELL. Bare sessions don't carry
+	// --continue because they're not tied to a project transcript.
+	launch := bareSessionLaunchCmd(req.Agent, s.cfg.Agents.Default, s.freshCommands())
+	// Tag what actually runs there, in the same tmux call that
+	// creates the session. A bare session has no project sidecar,
+	// so untagged the poll loop assumed Claude — a plain shell
+	// prompt then read as "Claude crashed" (error) — and a tick
+	// landing between two separate calls did exactly that.
+	tag := bareSessionAgentTag(req.Agent, s.cfg.Agents.Default)
+	if err := tmux.NewWithAgent(ctx, name, path, launch, tag); err != nil {
+		http.Error(w, "tmux new-session: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	what := shellLaunchCmd()
+	if id, ok := agent.ParseID(tag); ok {
+		what = agent.ByID(id).Binary()
+	}
+	if !s.confirmStarted(ctx, w, name, what) {
+		return
 	}
 	// Chrome the new session so when the client ssh-attaches it
 	// lands in a ccmux-styled bar. The "project label" for bare
@@ -887,7 +1110,6 @@ func (s *server) createBareSession(w http.ResponseWriter, r *http.Request) {
 	// something readable in the status bar.
 	s.applyChrome(ctx, name, filepath.Base(path))
 
-	host, _ := os.Hostname()
 	writeJSON(w, daemon.NewBareSessionResponse{
 		Session: name,
 		Path:    path,
@@ -939,11 +1161,18 @@ func parseUsageWindow(q string) time.Duration {
 // which no tmux session name can hold (tmux 3.7 refuses it, older
 // versions store it escaped). Centralizes the rule every handler that
 // passes a name to a tmux `-t` argument shares.
+//
+// A leading `$` is refused too: tmux reads a target session starting
+// with `$` as a session ID even in the exact `=name:` form, so
+// POST /v1/sessions/$1/kill killed whichever session had ID $1, and a
+// session created as "$0" could never be found by that name (tmux keeps
+// `@` and `%` names verbatim and finds them by name, so those are fine).
 func badSessionName(name string) bool {
-	return strings.ContainsAny(name, "/\\:.") || strings.ContainsFunc(name, unicode.IsControl)
+	return strings.HasPrefix(name, "$") ||
+		strings.ContainsAny(name, "/\\:.") || strings.ContainsFunc(name, unicode.IsControl)
 }
 
-const badSessionNameMsg = "name must not contain /, \\, :, . or control characters"
+const badSessionNameMsg = "name must not start with $ or contain /, \\, :, . or control characters"
 
 // badNewSessionName is badSessionName for a name ccmux gives a session
 // (create, rename), which additionally must not contain `#`: tmux
@@ -955,7 +1184,7 @@ func badNewSessionName(name string) bool {
 	return badSessionName(name) || strings.Contains(name, "#")
 }
 
-const badNewSessionNameMsg = "name must not contain /, \\, :, ., # or control characters"
+const badNewSessionNameMsg = "name must not start with $ or contain /, \\, :, ., # or control characters"
 
 func (s *server) handleSessionsItem(w http.ResponseWriter, r *http.Request) {
 	// /v1/sessions/<name>[/<subaction>]
@@ -1004,7 +1233,7 @@ func (s *server) handleKill(w http.ResponseWriter, r *http.Request, name string)
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	if err := s.kill(ctx, name); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeTmuxError(w, err)
 		return
 	}
 	s.forgetKilled(name)
@@ -1037,7 +1266,11 @@ func (s *server) handleRename(w http.ResponseWriter, r *http.Request, name strin
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	if err := s.rename(ctx, name, req.Name); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		if strings.Contains(err.Error(), "duplicate session") {
+			http.Error(w, fmt.Sprintf("a session named %q already exists", req.Name), http.StatusConflict)
+			return
+		}
+		writeTmuxError(w, err)
 		return
 	}
 	renamed := s.renameTracked(name, req.Name)
@@ -1069,10 +1302,33 @@ func (s *server) handleSendKeys(w http.ResponseWriter, r *http.Request, name str
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	if err := tmux.SendKeys(ctx, name, req.Keys); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeTmuxError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// sessionNotFound reports whether a tmux error means the targeted
+// session doesn't exist — including there being no tmux server at all.
+// internal/tmux folds tmux's stderr into its errors (a bare
+// exec.ExitError says only "exit status 1").
+func sessionNotFound(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "can't find session") ||
+		strings.Contains(msg, "no current session") ||
+		strings.Contains(msg, "no server running") ||
+		(strings.Contains(msg, "error connecting to") && strings.Contains(msg, "No such file or directory"))
+}
+
+// writeTmuxError answers a failed tmux call on a named session: 404
+// when the session doesn't exist (kill/rename/send-keys used to answer
+// 500 for that, indistinguishable from a real failure), else 500.
+func writeTmuxError(w http.ResponseWriter, err error) {
+	if sessionNotFound(err) {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	http.Error(w, err.Error(), http.StatusInternalServerError)
 }
 
 // handleNotes serves both list and read for a project's markdown
@@ -1226,20 +1482,30 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request, name stri
 	// mapping below is unit-testable with an injected failure.
 	out, err := s.capture(ctx, name, lines)
 	if err != nil {
-		// tmux exits non-zero when the session is gone, and internal/
-		// tmux folds the stderr diagnostic into the wrapped error (a
-		// bare exec.ExitError stringifies as just "exit status 1", so
-		// matching on err.Error() alone never fired); map it to 404 so
-		// clients can distinguish "no session" from other errors.
-		if strings.Contains(err.Error(), "can't find session") ||
-			strings.Contains(err.Error(), "no current session") {
-			http.Error(w, "session not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		// tmux exits non-zero when the session is gone; map that to 404
+		// so clients can distinguish "no session" from other errors.
+		writeTmuxError(w, err)
 		return
 	}
-	writeJSON(w, daemon.PreviewResponse{Lines: lines, Content: out})
+	writeJSON(w, daemon.PreviewResponse{Lines: lines, Content: lastLines(out, lines)})
+}
+
+// lastLines keeps the last n lines of a capture-pane dump, ignoring the
+// blank rows that pad out the visible screen below the last output.
+// capture-pane -S -N returns N lines of scrollback plus the whole
+// visible screen, so ?lines=N (and MCP read_pane) answered N + the
+// screen height, while reporting "lines": N.
+func lastLines(s string, n int) string {
+	rows := strings.Split(s, "\n")
+	end := len(rows)
+	for end > 0 && strings.TrimSpace(rows[end-1]) == "" {
+		end--
+	}
+	rows = rows[max(0, end-n):end]
+	if len(rows) == 0 {
+		return ""
+	}
+	return strings.Join(rows, "\n") + "\n"
 }
 
 // handlePeers returns every tailnet peer plus an indication of which
@@ -1413,6 +1679,10 @@ func (s *server) handleConversations(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1441,6 +1711,8 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-s.streamsDone: // daemon shutting down (nil: never)
 			return
 		case <-hb.C:
 			if _, err := fmt.Fprintf(w, ": ping\n\n"); err != nil {
@@ -1559,15 +1831,30 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name must be a single non-hidden path segment: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// An empty agent defers to the project's recorded one (Claude when
+	// there is none); a typo'd one is refused instead of quietly
+	// launching Claude.
+	chosenAgent, err := requestAgent(req.Agent)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	dir := filepath.Join(project.ResolveRoot(s.cfg.Projects.Root), name)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
-	// ParseID returns ok=false on empty + unknown strings, which we
-	// treat the same: an empty/typo'd Agent just defers to the
-	// claude-default on read via project.ReadAgent.
-	chosenAgent, _ := agent.ParseID(req.Agent)
+	host, _ := os.Hostname()
+	// A project whose session is already running is answered like
+	// POST /v1/sessions answers one: 200 with that session (creating it
+	// again used to fail with 500 "duplicate session"), or 409 when a
+	// session of that name runs in another directory.
+	if st, done := s.existingSession(ctx, w, tmux.SessionNameForPath(dir), dir); done {
+		if st != nil {
+			writeJSON(w, daemon.NewProjectResponse{Session: st.Name, Path: st.Path, Host: host})
+		}
+		return
+	}
 	session, err := scaffold.StartSession(ctx, scaffold.Options{
 		Name:     name,
 		Dir:      dir,
@@ -1578,13 +1865,15 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "start: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if !s.confirmStarted(ctx, w, session, agent.ByID(chosenAgent).Binary()) {
+		return
+	}
 	// Apply ccmux chrome on the session before the client ssh-attaches.
 	// Without this the remote tmux looks like plain stock tmux instead
 	// of a ccmux-managed session — no project label in the status bar,
 	// no detach hint, no moshi badge.
 	s.applyChrome(ctx, session, name)
 
-	host, _ := os.Hostname()
 	writeJSON(w, daemon.NewProjectResponse{
 		Session: session,
 		Path:    dir,

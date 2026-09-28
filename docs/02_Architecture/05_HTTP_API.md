@@ -39,7 +39,9 @@ If Tailscale isn't running, the tailnet listener silently doesn't start
 - **No TLS.** Tailscale's WireGuard tunnel is the encryption + identity
   boundary; the HTTP listener is plain HTTP bound to the tailnet IP.
 - Request bodies are capped at **64 KiB**; larger bodies fail to decode
-  (`400`).
+  (`400`), and so does anything but whitespace after the JSON value.
+- `GET` endpoints answer `405` to other methods (`/v1/health` also takes
+  `HEAD`).
 
 ---
 
@@ -95,7 +97,9 @@ Status conventions across the API:
 | `401` | invalid or expired pairing token (`/v1/pair` only) |
 | `404` | not found — or **this daemon predates the endpoint** |
 | `405` | wrong HTTP method |
+| `409` | conflict: the session name is taken (by a session in another directory, or on rename) |
 | `500` | server / tmux / scaffold failure |
+| `502` | a session was created but its agent exited at once (binary missing or broken) |
 | `503` | feature unavailable (e.g. `/v1/pair-token` with `listen_tailnet` off) |
 
 > **Forward/backward compatibility:** the API evolves by *adding* JSON
@@ -145,40 +149,53 @@ List every tmux session this daemon manages, with daemon-derived state.
 
 #### `POST /v1/sessions`
 Create-or-attach a **project-bound** agent session (idempotent on the tmux
-session name). Persists the chosen agent to `<project>/.ccmux/agent`.
+session name). Runs the requested `agent` (else the project's recorded one,
+else Claude), tags the session with it, and — once it has started — persists
+a requested agent to `<project>/.ccmux/agent`.
 - **Request:** `NewSessionRequest` — `project` required.
-- **Response `200`:** `SessionState` for the created/existing session.
-- **Errors:** `400` missing `project` / bad name / decode error; `404`
-  project path not found; `500` tmux failure.
+- **Response `200`:** `SessionState`. For a session that already runs in the
+  requested directory: its real state, agent and path; nothing is started.
+- **Errors:** `400` missing `project` / bad name / unknown `agent` / path not
+  a directory / decode error; `404` project path not found; `409` a session
+  of that name runs in a different directory; `500` tmux failure; `502` the
+  agent exited right after starting (e.g. not installed).
 - `path` defaults to `<projects_root>/<project>` **on the daemon host**.
 
 #### `POST /v1/sessions/bare`
 Create a **shell-only** tmux session not tied to any project (no scaffold).
 - **Request:** `NewBareSessionRequest`.
-- **Response `200`:** `NewBareSessionResponse`.
+- **Response `200`:** `NewBareSessionResponse` (for an existing session of
+  that name, the directory it really runs in).
 - `path` empty resolves to `sessions.default_dir` or `$HOME` **on the daemon
   host** (never the client's home). `agent` empty falls back to
-  `sessions.default_agent` then `$SHELL`; `"shell"` means no agent.
+  `sessions.default_agent` then `$SHELL`; `"shell"` means no agent; any
+  other value must be a known agent id (`400` otherwise).
+- **Errors:** as `POST /v1/sessions`; `409` only when `path` is given and an
+  existing session of that name runs elsewhere.
 
 #### `POST /v1/sessions/{name}/kill`
 Kill a session by name. Emits a `killed` SSE event.
-- **Request:** none. **Response:** `204`. **Errors:** `400` missing name;
-  `500` tmux failure.
+- **Request:** none. **Response:** `204`. **Errors:** `400` missing or bad
+  name; `404` no such session; `500` tmux failure.
 
 #### `POST /v1/sessions/{name}/rename`
 Rename a session. `{name}` is the **current** name; the body carries the new
 one.
 - **Request:** `RenameRequest`. **Response `200`:** `SessionState`
   (`{name: <newName>, host: "local"}`).
+- **Errors:** `400` bad name; `404` no such session; `409` another session
+  already has the new name.
 
 #### `POST /v1/sessions/{name}/send-keys`
 Send raw keystrokes/text into the session's active pane (e.g. type a reply +
 Enter). Passed through to `tmux send-keys`.
-- **Request:** `SendKeysRequest`. **Response:** `204`.
+- **Request:** `SendKeysRequest`. **Response:** `204`. `404` if the session
+  doesn't exist.
 
 #### `GET /v1/sessions/{name}/preview`
-Last N lines of the active pane as plain text (ANSI stripped). A lightweight
-"peek" without opening the attach socket.
+Last N lines of the active pane as plain text (ANSI stripped) — exactly N
+when the pane has that many, not counting the blank rows below the last
+output. A lightweight "peek" without opening the attach socket.
 - **Query:** `?lines=N` (default `24`; values above `500` are clamped to `500`).
 - **Response `200`:** `PreviewResponse`. `404` if the session doesn't exist.
 
@@ -186,7 +203,8 @@ Last N lines of the active pane as plain text (ANSI stripped). A lightweight
 Upgrade to a WebSocket bridged to a real `tmux attach-session` in a PTY: a
 true interactive terminal (live output, input, resize). This is how a mobile
 client gives a full terminal **without** ssh/mosh.
-- **Upgrade:** `GET` → `101 Switching Protocols`.
+- **Upgrade:** `GET` → `101 Switching Protocols`; `404` (no upgrade) if the
+  session doesn't exist.
 - **After upgrade** (uses `github.com/coder/websocket` framing):
   - **client → server, binary frame:** raw stdin bytes (keystrokes).
   - **client → server, text frame:** JSON `{"cols":N,"rows":N}` to resize.
@@ -212,9 +230,14 @@ the daemon's hostname.
 Create a brand-new project (**directory only** — no `CLAUDE.md`/`docs/`/git)
 under the projects root, and start an agent session inside it.
 - **Request:** `NewProjectRequest` — `name` required.
-- **Response `200`:** `NewProjectResponse`.
+- **Response `200`:** `NewProjectResponse`. Idempotent like
+  `POST /v1/sessions`: if the project's session already runs, it is returned
+  and nothing is started.
 - **Errors:** `400` if `name` isn't a single non-hidden path segment (no
-  `/`, `\`, no leading `.`) — a directory-escape guard for tailnet peers.
+  `/`, `\`, no leading `.`, no control characters) — a directory-escape
+  guard for tailnet peers — or `agent` isn't a known agent id; `409` the
+  project's session name is taken by a session in another directory; `502`
+  the agent exited right after starting.
 
 ---
 
@@ -364,8 +387,10 @@ Redeem a pairing token: install the device's SSH public key into
 Register/refresh a push token on an already-paired host (after the user
 grants notifications, or the OS rotates the token).
 - **Request:** `RegisterDeviceRequest`.
-- **Response:** `204`. `400` for a missing token or a bad `provider`/`env`;
-  `403` if `public_key` isn't in the host's `~/.ssh/authorized_keys` (i.e.
+- **Response:** `204`. `400` for a missing or malformed token (printable
+  ASCII only; at most 200 characters for APNs, 4096 for FCM) or a bad
+  `provider`/`env`; `403` if `public_key` isn't in the host's
+  `~/.ssh/authorized_keys` (i.e.
   the device never paired); `500` if the registration couldn't be saved (it
   isn't kept).
 - The device is identified by the SSH `public_key` it paired with (stored
@@ -556,12 +581,15 @@ The daemon enforces these (and `400`s on violation); validate before sending
 for a better UX:
 
 - **tmux session names** must not contain `/`, `\`, `:`, `.` or control
-  characters (a tmux target-spec injection guard). Names you create or rename
-  to also must not contain `#`: tmux expands formats in them. Leading and
-  trailing whitespace is trimmed.
+  characters (a tmux target-spec injection guard), and must not start with
+  `$` (tmux reads a `$`-prefixed target as a session ID, so `$1` would act
+  on whichever session has ID `$1`). Names you create or rename to also
+  must not contain `#`: tmux expands formats in them. Leading and trailing
+  whitespace is trimmed.
 - **project names** for `POST /v1/projects`, and for `POST /v1/sessions`
   without a `path`, must be a single non-hidden path segment — no `/`, `\`,
-  no leading `.`. A `path` may start with `~/` (the daemon's home).
+  no leading `.`, no control characters (C0, DEL, C1). A `path` may start
+  with `~/` (the daemon's home).
 - **notes file paths** must be project-relative, contain no `..`, and end in
   `.md`.
 - request bodies are capped at **64 KiB**.
