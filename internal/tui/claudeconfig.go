@@ -439,12 +439,30 @@ func (m claudeModel) View(width, height int) string {
 func (m claudeModel) ViewBody(width, height int) string {
 	m.narrow = isNarrow(width)
 	headerStr := m.viewBodyHeader()
-	browserView := m.browser.View(width, m.browserHeight(height))
-	body := lipgloss.JoinVertical(lipgloss.Left, headerStr, browserView)
+	backup := ""
 	if !m.narrow && m.lastBackup != "" {
-		body = lipgloss.JoinVertical(lipgloss.Left, body, m.st.Muted.Render("last write backed up to "+summarizePath(m.lastBackup)))
+		backup = m.st.Muted.Render("last write backed up to " + summarizePath(m.lastBackup))
+	}
+	browserH := height - lipgloss.Height(headerStr)
+	if backup != "" {
+		browserH--
+	}
+	body := lipgloss.JoinVertical(lipgloss.Left, headerStr, m.browserView(width, browserH))
+	if backup != "" {
+		body = lipgloss.JoinVertical(lipgloss.Left, body, backup)
 	}
 	return body
+}
+
+// browserView renders the embedded browser in the rows left under the
+// settings header. While a settings row has the focus the browser is
+// drawn without a selection of its own: both used to show a "▌" bar,
+// and Enter acted on the settings row while the browser row looked
+// just as selected.
+func (m claudeModel) browserView(width, height int) string {
+	b := m.browser
+	b.dormant = m.focusTop
+	return b.ViewFit(width, height)
 }
 
 // viewBodyHeader builds the settings-rows header stacked above the
@@ -631,9 +649,22 @@ func (m claudeModel) viewPicker(width, height int) string {
 	}
 	lines = append(lines, "")
 	pickerW := minInt(96, width-4) - 2
-	for i, o := range rows {
-		row := fmt.Sprintf("%-40s %s", o.Label, st.Muted.Render(o.Desc))
-		lines = append(lines, components.RenderListRow(st, row, i == m.pickerCursor, pickerW))
+	// One row per option, always: the label column is only as wide as
+	// the longest label, and whatever doesn't fit is cut with "…" —
+	// rows used to wrap mid-line into the next option at 80 columns.
+	labelW := 0
+	for _, o := range rows {
+		labelW = maxInt(labelW, lipgloss.Width(o.Label))
+	}
+	labelW = minInt(labelW, maxInt(8, pickerW/2))
+	rowW := pickerW - 2 // RenderListRow's selection bar
+	// A list taller than the terminal scrolls with the cursor.
+	budget := maxInt(3, height-len(lines)-4)
+	start, end := windowAroundCursor(m.pickerCursor, len(rows), budget)
+	for i := start; i < end; i++ {
+		o := rows[i]
+		row := padLabel(truncate(o.Label, labelW), labelW) + " " + st.Muted.Render(o.Desc)
+		lines = append(lines, components.RenderListRow(st, truncate(row, rowW), i == m.pickerCursor, pickerW))
 	}
 	lines = append(lines, "",
 		st.Muted.Render(tr("↑↓ navigate  enter: choose  esc: cancel")),
@@ -973,18 +1004,29 @@ func (m claudeModel) unifiedModelChoices() []modelChoice {
 }
 
 // applyModelChoiceCmd writes both targets of a pick: settings.json
-// `model` AND ccmux's pin. Doing both in one command (rather than two
-// chained messages) keeps the success/failure reporting atomic — the
-// user sees one toast, and a failure on either write surfaces.
+// `model` AND ccmux's pin — all or nothing. The pin goes first because
+// it's the write that gets refused (config.toml that doesn't parse);
+// settings.json changes only once the pin is saved, and the pin is put
+// back if settings.json can't be written. The other order half-applied a
+// pick on a broken config.toml: settings.json changed, the pin didn't,
+// and the Agents tab kept showing the old model.
 func applyModelChoiceCmd(c modelChoice) tea.Cmd {
 	return func() tea.Msg {
+		prev, err := config.Load()
+		if err != nil {
+			return claudeModelChangedMsg{New: c.Settings, Err: fmt.Errorf("model not changed: %w", err)}
+		}
+		saved, err := setCcmuxClaudeDefault(c.Pin)
+		if err != nil {
+			return claudeModelChangedMsg{New: c.Settings, Err: fmt.Errorf("model not changed: %w", err)}
+		}
 		backup, err := claudeconfig.SetModel(c.Settings)
 		if err != nil {
+			err = fmt.Errorf("model not changed: %w", err)
+			if _, rerr := setCcmuxClaudeDefault(prev.Claude.DefaultModel); rerr != nil {
+				err = fmt.Errorf("%w (and restoring the ccmux pin failed: %v)", err, rerr)
+			}
 			return claudeModelChangedMsg{New: c.Settings, Err: err}
-		}
-		saved, perr := setCcmuxClaudeDefault(c.Pin)
-		if perr != nil {
-			return claudeModelChangedMsg{New: c.Settings, Backup: backup, Err: perr}
 		}
 		return claudeModelChangedMsg{New: c.toastValue(), Backup: backup, Cfg: &saved}
 	}

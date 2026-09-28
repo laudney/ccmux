@@ -57,9 +57,7 @@ func sshShellCommand(target sshsetup.Target) *exec.Cmd {
 // the Network screen's own SSHCmd.
 func sshShellExec(target sshsetup.Target) tea.Cmd {
 	cmd := sshShellCommand(target)
-	return tea.ExecProcess(cmd, func(err error) tea.Msg {
-		return attachExitedMsg{Err: err}
-	})
+	return execAttach(cmd, "ssh "+target.Host, nil, true)
 }
 
 // persistWizardAdded writes new user@host entries to hosts.toml
@@ -113,7 +111,7 @@ func persistWizardAdded(a App, target sshsetup.Target, addedUsers []string) App 
 		}
 		return a
 	}
-	a.adoptConfig(saved)
+	_ = a.adoptConfig(saved) // hosts only: the projects root is unchanged
 	return a
 }
 
@@ -165,7 +163,7 @@ func persistWizardCorrection(a App, original, final sshsetup.Target) App {
 		}
 		return a
 	}
-	a.adoptConfig(saved)
+	_ = a.adoptConfig(saved) // hosts only: the projects root is unchanged
 	return a
 }
 
@@ -244,12 +242,10 @@ func remoteAttachTargetFromErr(msg attachExitedMsg) *sshsetup.Target {
 		return nil
 	}
 	// ssh / mosh both surface auth failures as exit 255 with
-	// "Permission denied" in stderr. tea.ExecProcess folds stderr
-	// into the error string for us (the inner *exec.ExitError
-	// Stderr field is the last 64 bytes), so a substring check
-	// catches it. Other exit-255 cases (e.g. host key mismatch)
+	// "Permission denied" on stderr, which execAttach captures into
+	// msg.Stderr. Other exit-255 cases (e.g. host key mismatch)
 	// produce different strings and route to a generic toast.
-	s := strings.ToLower(msg.Err.Error())
+	s := strings.ToLower(msg.Err.Error() + " " + msg.Stderr)
 	if !strings.Contains(s, "permission denied") &&
 		!strings.Contains(s, "publickey") &&
 		!strings.Contains(s, "exit status 255") {

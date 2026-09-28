@@ -33,8 +33,8 @@ func defaultTourSteps() []tourStep {
 		{
 			Title: tr("Welcome to ccmux"),
 			Body: []string{
-				tr("ccmux is a terminal UI for managing long-lived Claude Code"),
-				tr("sessions on top of tmux, Mosh, and Tailscale."),
+				tr("ccmux is a terminal UI for long-lived coding-agent sessions"),
+				tr("(Claude Code, Codex, Cursor, and more) on top of tmux, Mosh, and Tailscale."),
 				"",
 				tr("This %d-step tour shows you the essentials. It runs once on"),
 				tr("first launch and re-opens any time with `T`."),
@@ -55,16 +55,17 @@ func defaultTourSteps() []tourStep {
 			KeyHint: fmt.Sprintf(tr("Press %s / F1 anywhere to come back here"), screenKey(ScreenSessions)),
 		},
 		{
-			Title: tr("Projects, Conversations, Notes, Agents (") + screenKey(ScreenProjects) + "-" + screenKey(ScreenSettings) + ")",
+			Title: fmt.Sprintf(tr("The other screens (%s-%s)"), screenKey(ScreenProjects), screenKey(ScreenNetwork)),
 			Body: []string{
 				tr("The remaining screens cover the full workflow loop:"),
 			},
 			Bullets: []string{
-				fmt.Sprintf(tr("%s — Projects: every dir under ~/Projects with a CLAUDE.md or .git"), screenKey(ScreenProjects)),
-				fmt.Sprintf(tr("%s — Conversations: every past agent dialogue (Claude/Codex/Antigravity) — resume any"), screenKey(ScreenConversations)),
-				fmt.Sprintf(tr("%s — Notes: per-project docs/ vault — Specs, ADRs, Agent Logs"), screenKey(ScreenNotes)),
-				fmt.Sprintf(tr("%s — Agents: edit ~/.claude / ~/.codex / ~/.gemini/antigravity-cli config"), screenKey(ScreenAgents)),
+				fmt.Sprintf(tr("%s — Projects: every folder under your projects root (~/Projects by default)"), screenKey(ScreenProjects)),
+				fmt.Sprintf(tr("%s — Conversations: every past agent conversation — resume any"), screenKey(ScreenConversations)),
+				fmt.Sprintf(tr("%s — Notes: every markdown file in the project, rendered"), screenKey(ScreenNotes)),
+				fmt.Sprintf(tr("%s — Agents: each agent's own config — model, hooks, commands, skills"), screenKey(ScreenAgents)),
 				fmt.Sprintf(tr("%s — Settings: ccmux's own config (paths, daemon, theme)"), screenKey(ScreenSettings)),
+				fmt.Sprintf(tr("%s — Network: your devices on the tailnet — ssh in, set up keys"), screenKey(ScreenNetwork)),
 			},
 			KeyHint: tr("Number keys jump between screens · `?` opens contextual help · q quits"),
 		},
@@ -102,6 +103,9 @@ type tourModel struct {
 	step   int
 	steps  []tourStep
 	st     styles.Styles
+	// scroll is the first body row shown when a slide is taller than
+	// the terminal; reset on every slide change.
+	scroll int
 }
 
 func newTour(st styles.Styles) tourModel {
@@ -115,6 +119,7 @@ func (m *tourModel) Open() {
 	m.steps = defaultTourSteps()
 	m.active = true
 	m.step = 0
+	m.scroll = 0
 }
 
 // Close hides the tour without advancing.
@@ -134,6 +139,7 @@ func (m *tourModel) Next() bool {
 		return false
 	}
 	m.step++
+	m.scroll = 0
 	return true
 }
 
@@ -141,6 +147,7 @@ func (m *tourModel) Next() bool {
 func (m *tourModel) Prev() {
 	if m.step > 0 {
 		m.step--
+		m.scroll = 0
 	}
 }
 
@@ -150,10 +157,38 @@ func (m tourModel) View(w, h int) string {
 	if !m.active || len(m.steps) == 0 {
 		return ""
 	}
-	if m.step >= len(m.steps) {
-		m.step = len(m.steps) - 1
+	l := m.layout(w, h)
+	body := l.body
+	if len(body) > l.room {
+		// Taller than the terminal: show a window of the slide and say
+		// how to scroll it. Clipping it (the old behaviour) lost the
+		// bottom of the slide on a phone.
+		maxOff := len(body) - l.room
+		off := maxInt(0, minInt(m.scroll, maxOff))
+		body = append(append([]string{}, body[off:off+l.room]...),
+			m.st.Muted.Render(fmt.Sprintf(tr("↑↓ scroll %d/%d"), off+1, maxOff+1)))
 	}
-	step := m.steps[m.step]
+	card := lipgloss.NewStyle().
+		Padding(l.padY, l.padX).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(m.st.P.Mauve).
+		Width(l.cardW).
+		Render(strings.Join(append(body, l.footer...), "\n"))
+
+	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, card)
+}
+
+// tourLayout is the current slide laid out for a w×h terminal: the
+// scrollable part (title, body, bullets), the footer that always shows
+// (progress dots, key hint), and how many body rows fit.
+type tourLayout struct {
+	cardW, padX, padY int
+	body, footer      []string
+	room              int
+}
+
+func (m tourModel) layout(w, h int) tourLayout {
+	step := m.steps[minInt(m.step, len(m.steps)-1)]
 
 	// Card width = clamp between 50 and 80 cols so the layout reads
 	// well on phones (narrow) and big monitors (don't get a wall).
@@ -171,24 +206,38 @@ func (m tourModel) View(w, h int) string {
 	if cardW > w-2 {
 		cardW = maxInt(1, w-2)
 	}
-
-	var lines []string
-	// Title.
-	titleStyle := m.st.Title.Foreground(m.st.P.Mauve).Bold(true)
-	lines = append(lines, titleStyle.Render(step.Title))
-	lines = append(lines, "")
-
-	// Body.
-	lines = append(lines, step.Body...)
-	if len(step.Bullets) > 0 && len(step.Body) > 0 {
-		lines = append(lines, "")
+	l := tourLayout{cardW: cardW, padX: m.st.Spacing.LG, padY: m.st.Spacing.SM}
+	if w < 60 {
+		l.padX = m.st.Spacing.SM // phone: the text needs the columns more
 	}
+	textW := maxInt(8, cardW-2*l.padX)
+	wrap := func(s string) []string {
+		return strings.Split(lipgloss.NewStyle().Width(textW).Render(s), "\n")
+	}
+
+	titleStyle := m.st.Title.Foreground(m.st.P.Mauve).Bold(true)
+	l.body = append(wrap(titleStyle.Render(step.Title)), "")
+	for _, line := range step.Body {
+		l.body = append(l.body, wrap(line)...)
+	}
+	if len(step.Bullets) > 0 && len(step.Body) > 0 {
+		l.body = append(l.body, "")
+	}
+	// Bullets wrap under their own text (a hanging indent), not back
+	// under the bullet glyph.
+	const bulletIndent = 4 // "  • "
 	for _, b := range step.Bullets {
-		lines = append(lines, "  "+m.st.Key.Render("•")+" "+b)
+		wrapped := strings.Split(lipgloss.NewStyle().Width(maxInt(4, textW-bulletIndent)).Render(b), "\n")
+		for i, line := range wrapped {
+			if i == 0 {
+				l.body = append(l.body, "  "+m.st.Key.Render("•")+" "+line)
+			} else {
+				l.body = append(l.body, strings.Repeat(" ", bulletIndent)+line)
+			}
+		}
 	}
 
 	// Progress dots.
-	lines = append(lines, "")
 	dots := strings.Builder{}
 	for i := range m.steps {
 		if i == m.step {
@@ -200,21 +249,34 @@ func (m tourModel) View(w, h int) string {
 			dots.WriteString(" ")
 		}
 	}
-	lines = append(lines, dots.String())
-
-	// Key hint footer.
+	l.footer = []string{"", dots.String()}
 	if step.KeyHint != "" {
-		lines = append(lines, "")
-		lines = append(lines, m.st.Muted.Render(step.KeyHint))
+		l.footer = append(l.footer, "")
+		l.footer = append(l.footer, wrap(m.st.Muted.Render(step.KeyHint))...)
 	}
 
-	body := strings.Join(lines, "\n")
-	card := lipgloss.NewStyle().
-		Padding(m.st.Spacing.SM, m.st.Spacing.LG).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(m.st.P.Mauve).
-		Width(cardW).
-		Render(body)
+	// Rows the body may use: the terminal less the border, the vertical
+	// padding and the footer. Short terminals drop the vertical padding
+	// first; the body scrolls when it still doesn't fit (one row then
+	// goes to the scroll hint).
+	fits := func() int { return h - 2 - 2*l.padY - len(l.footer) }
+	if len(l.body) > fits() {
+		l.padY = m.st.Spacing.XS
+	}
+	l.room = fits()
+	if len(l.body) > l.room {
+		l.room--
+	}
+	l.room = maxInt(1, l.room)
+	return l
+}
 
-	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, card)
+// ScrollBy moves the slide's scroll offset by delta rows, clamped to
+// what a w×h terminal leaves hidden.
+func (m *tourModel) ScrollBy(delta, w, h int) {
+	if !m.active || len(m.steps) == 0 {
+		return
+	}
+	l := m.layout(w, h)
+	m.scroll = maxInt(0, minInt(m.scroll+delta, len(l.body)-l.room))
 }

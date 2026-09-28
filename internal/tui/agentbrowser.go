@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/skzv/ccmux/internal/termsafe"
 	"github.com/skzv/ccmux/internal/tui/components"
 	"github.com/skzv/ccmux/internal/tui/styles"
 )
@@ -68,6 +69,12 @@ type agentBrowser struct {
 	focus    agentBrowserFocus
 	preview  viewport.Model
 	rendered string
+
+	// dormant is set (on a render copy) while the host's own rows hold
+	// the keyboard: the browser then shows no selection bar and no
+	// focused pane, so only one row on screen looks selected — the one
+	// Enter acts on.
+	dormant bool
 }
 
 type agentBrowserRow struct {
@@ -286,7 +293,12 @@ func (b *agentBrowser) updatePreview() {
 	content := row.item.Preview
 	if content == "" {
 		content = b.st.Muted.Render(tr("(no preview)"))
-	} else if row.item.Markdown {
+	} else if !row.item.Markdown {
+		// Structured text built from config files (hooks, MCP servers):
+		// never let it carry terminal control sequences.
+		content = termsafe.String(content)
+	} else {
+		content = markdownForPreview(content)
 		width := b.preview.Width - 4
 		if width < 20 {
 			width = 20
@@ -414,9 +426,11 @@ func (b agentBrowser) View(width, height int) string {
 	previewContent := b.preview.View()
 
 	listStyle, previewStyle := st.Pane, st.Pane
-	if b.focus == agentBrowserFocusList {
+	switch {
+	case b.dormant:
+	case b.focus == agentBrowserFocusList:
 		listStyle = st.PaneFocused
-	} else {
+	default:
 		previewStyle = st.PaneFocused
 	}
 	listPane := listStyle.Width(g.listFrameW).Height(g.paneFrameH).Render(listContent)
@@ -426,6 +440,23 @@ func (b agentBrowser) View(width, height int) string {
 
 	hint := b.renderHint()
 	return lipgloss.JoinVertical(lipgloss.Left, body, "", hint)
+}
+
+// agentBrowserMinHeight is the fewest rows the browser renders in (its
+// geometry floors smaller heights to this).
+const agentBrowserMinHeight = 10
+
+// ViewFit is View for a host that may not have agentBrowserMinHeight
+// rows left under its own header: on a short terminal it returns a
+// one-line hint instead of a browser clipped mid-pane.
+func (b agentBrowser) ViewFit(width, height int) string {
+	if height < agentBrowserMinHeight {
+		if !b.HasItems() {
+			return ""
+		}
+		return b.st.Muted.Width(maxInt(1, width)).Render(tr("(make the terminal taller to browse this agent's hooks, MCP servers, commands and skills)"))
+	}
+	return b.View(width, height)
 }
 
 // renderHint produces the muted hint line under the panes. The hint
@@ -488,8 +519,9 @@ func (b agentBrowser) renderList(width, height int) string {
 		}
 		row := strings.Repeat(" ", itemIndentW) + dot + content
 		selected := i == b.cursor
-		if selected && b.focus == agentBrowserFocusPreview {
-			lines = append(lines, lipgloss.NewStyle().Foreground(st.P.FGMuted).Render(row))
+		if selected && (b.focus == agentBrowserFocusPreview || b.dormant) {
+			// Same columns as the other rows: the selection bar's two cells stay.
+			lines = append(lines, strings.Repeat(" ", selBarW)+lipgloss.NewStyle().Foreground(st.P.FGMuted).Render(row))
 		} else {
 			lines = append(lines, components.RenderListRow(st, row, selected, width))
 		}

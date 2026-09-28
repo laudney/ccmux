@@ -203,6 +203,7 @@ type App struct {
 	confirm confirmationModal
 
 	helpOpen         bool
+	helpScroll       int                        // first help line shown when the overlay is taller than the terminal
 	usageOpen        bool                       // `u` opens the full usage overlay; esc/u closes
 	convPreview      conversationPreviewOverlay // `p` opens the transcript-preview overlay on the Conversations screen
 	projectInfoOpen  bool                       // `i` on Projects opens the per-project info overlay; esc/i closes
@@ -655,6 +656,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case openConversationsForProjectMsg:
 		a.screen = ScreenConversations
 		a.conversationsM.SetProjectFilter(msg.Project)
+		a.conversationsM.FocusAgent(msg.Agent)
 		a.conversationsM.SetLoading(true)
 		return a, tea.Batch(a.refreshConversationsCmd(), a.conversationsM.SpinnerTickCmd())
 
@@ -861,11 +863,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.projectsM.SetDefaultAgent(a.cfg.Agents.Default)
 		a.projectsM.SetAgentCommands(a.cfg.AgentCommands())
 		a.dashboard.SetVersion(a.version)
-		a.sessionsM.SetSessions(a.sessions)
+		// The list may have moved the selection (a kill, a session that
+		// ended): the preview pane re-captures the new one right away.
+		previewCmd := a.sessionsM.SetSessions(a.sessions)
 		if msg.Err != nil {
 			a.toasts.Set(toastError, tr("refresh: ")+msg.Err.Error(), 5*time.Second)
 		}
-		return a, nil
+		return a, previewCmd
 
 	case projectsLoadedMsg:
 		if msg.Err == nil {
@@ -965,6 +969,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.toasts.Set(toastError, tr("rename failed: ")+msg.Err.Error(), 5*time.Second)
 		} else {
 			a.toasts.Set(toastSuccess, fmt.Sprintf(tr("renamed %s → %s"), sessionDisplayName(msg.Host, msg.OldName), msg.NewName), 3*time.Second)
+			// Keep the cursor on the renamed row: the refresh below
+			// finds the selection by name, which just changed.
+			a.sessionsM.RenameSession(msg.Host, msg.OldName, msg.NewName)
 		}
 		return a, a.refreshSessionsCmd()
 
@@ -1000,15 +1007,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			port = 22
 		}
 		rt := &attachRemoteTarget{User: msg.User, Host: msg.DialHost, Port: port}
+		label := "ssh " + target
+		if msg.Mosh {
+			label = "mosh " + target
+		}
 		if !a.attach.active {
 			tick := a.startAttaching(attachKindRemote, msg.DialHost)
-			return a, tea.Batch(tick, tea.ExecProcess(c, func(err error) tea.Msg {
-				return attachExitedMsg{Err: err, RemoteSSHTarget: rt}
-			}))
+			return a, tea.Batch(tick, execAttach(c, label, rt, false))
 		}
-		return a, tea.ExecProcess(c, func(err error) tea.Msg {
-			return attachExitedMsg{Err: err, RemoteSSHTarget: rt}
-		})
+		return a, execAttach(c, label, rt, false)
 
 	case newBareSessionSubmitMsg:
 		// Close the form immediately — the form's own sessionsModel.Update
@@ -1080,16 +1087,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.toasts.Set(toastError, tr("reload config: ")+err.Error(), 5*time.Second)
 		} else {
 			a.startupConfigErr = nil
-			a.adoptConfig(cfg)
+			cmd := a.adoptConfig(cfg)
 			a.toasts.Set(toastSuccess, tr("config reloaded"), 2*time.Second)
+			return a, cmd
 		}
 		return a, nil
 
 	case configSavedMsg:
 		// A screen persisted a change via config.Update. Adopt the saved
 		// state so every screen — and any later save — sees it.
-		a.adoptConfig(msg.Cfg)
-		return a, nil
+		return a, a.adoptConfig(msg.Cfg)
 
 	case refreshAfterDetachMsg:
 		// Returning from tmux attach. Also clears the loading overlay
@@ -1104,14 +1111,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// tmux. The overlay stays drawn through the suspend; on the
 		// way back, the callback's attachExitedMsg clears it.
 		if msg.Nested {
-			return a, tea.ExecProcess(tmux.SwitchClientCmd(msg.Session), func(err error) tea.Msg {
-				return attachExitedMsg{Err: err}
-			})
+			return a, execAttach(tmux.SwitchClientCmd(msg.Session), "tmux switch-client -t "+msg.Session, nil, false)
 		}
-		return a, tea.ExecProcess(
-			tmux.AttachCmd(msg.Session, msg.DetachOthers),
-			func(err error) tea.Msg { return attachExitedMsg{Err: err} },
-		)
+		return a, execAttach(tmux.AttachCmd(msg.Session, msg.DetachOthers), "tmux attach -t "+msg.Session, nil, false)
 
 	case attachExitedMsg:
 		// Tmux exited (user detached, or the exec itself failed).
@@ -1140,8 +1142,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 			}
 			until := time.Now().Add(5 * time.Second)
+			text := attachFailureText(msg)
 			cmds = append(cmds, func() tea.Msg {
-				return toastMsg{Text: tr("tmux: ") + msg.Err.Error(), Kind: toastError, Until: until}
+				return toastMsg{Text: text, Kind: toastError, Until: until}
 			})
 		}
 		return a, tea.Batch(cmds...)
@@ -1192,12 +1195,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// config.toml. Adopt the saved config: every TUI launch reads
 		// ANTHROPIC_MODEL from a.cfg, which otherwise kept the old pin
 		// until restart. Then let the Agents tab reload and toast.
+		var adopt tea.Cmd
 		if msg.Cfg != nil {
-			a.adoptConfig(*msg.Cfg)
+			adopt = a.adoptConfig(*msg.Cfg)
 		}
 		var cmd tea.Cmd
 		a.agentsM, cmd = a.agentsM.Update(msg)
-		return a, cmd
+		return a, tea.Batch(adopt, cmd)
 
 	case projectAgentSwitchedMsg:
 		// Applied straight to the list: neither another active screen
@@ -1298,6 +1302,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "left", "p":
 				a.tour.Prev()
+			case "up", "k":
+				a.tour.ScrollBy(-1, a.width, a.height)
+			case "down", "j":
+				a.tour.ScrollBy(1, a.width, a.height)
 			case "esc", "q":
 				a.tour.Close()
 				a.markTourShown()
@@ -1305,12 +1313,25 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
-		// Help overlay takes precedence — `?` or `esc` close it, every
-		// other key passes through normally so muscle memory still works.
+		// Help overlay takes precedence — `?` or `esc` close it, the
+		// arrows scroll it when it's taller than the terminal, and every
+		// other key is swallowed.
 		if a.helpOpen {
 			switch msg.String() {
 			case "?", "esc":
 				a.helpOpen = false
+			case "up", "k":
+				a.helpScroll = maxInt(0, minInt(a.helpScroll, a.helpScrollMax())-1)
+			case "down", "j":
+				a.helpScroll = minInt(a.helpScroll+1, a.helpScrollMax())
+			case "pgup":
+				a.helpScroll = maxInt(0, minInt(a.helpScroll, a.helpScrollMax())-maxInt(1, a.height-helpChromeRows))
+			case "pgdown", " ":
+				a.helpScroll = minInt(a.helpScroll+maxInt(1, a.height-helpChromeRows), a.helpScrollMax())
+			case "home", "g":
+				a.helpScroll = 0
+			case "end", "G":
+				a.helpScroll = a.helpScrollMax()
 			}
 			return a, nil
 		}
@@ -1379,6 +1400,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// `?` opens the help overlay from any screen.
 		if msg.String() == "?" && !a.modalCapturingText() {
 			a.helpOpen = true
+			a.helpScroll = 0
 			return a, nil
 		}
 
@@ -1904,12 +1926,15 @@ func editorReloadMsg(source string) tea.Msg {
 
 // adoptConfig makes cfg (fresh from disk) the app's config: re-applies
 // the runtime-only overlays and pushes it into every screen that caches
-// a copy.
-func (a *App) adoptConfig(cfg config.Config) {
+// a copy. The returned command re-lists projects when the projects root
+// changed — without it, Projects and Notes kept showing the old root's
+// projects until the user pressed `r`.
+func (a *App) adoptConfig(cfg config.Config) tea.Cmd {
 	if a.runtimeOverrides != nil {
 		a.runtimeOverrides(&cfg)
 	}
 	a.overlayDetectedTier(&cfg)
+	rootChanged := project.ResolveRoot(cfg.Projects.Root) != project.ResolveRoot(a.cfg.Projects.Root)
 	a.cfg = cfg
 	// A config.toml edit may have changed `lang` — re-apply it so a
 	// $EDITOR-based language switch takes effect without a restart.
@@ -1922,6 +1947,13 @@ func (a *App) adoptConfig(cfg config.Config) {
 	a.projectsM.SetDefaultAgent(cfg.Agents.Default)
 	a.projectsM.SetAgentCommands(cfg.AgentCommands())
 	a.projectsM.SetProjectsRoot(cfg.Projects.Root)
+	if !rootChanged {
+		return nil
+	}
+	// Notes showed a project from the old root; it follows Projects, so
+	// start over from the new list.
+	a.notes.SetProject(nil)
+	return a.refreshProjectsCmd()
 }
 
 // overlayDetectedTier shows the auto-detected Claude tier when the user
@@ -1948,8 +1980,17 @@ func (a *App) overlayDetectedTier(cfg *config.Config) bool {
 func (a *App) SetRuntimeOverrides(fn func(*config.Config)) { a.runtimeOverrides = fn }
 
 // SetStartupConfigError records a config.toml load failure to show once
-// the UI is running.
-func (a *App) SetStartupConfigError(err error) { a.startupConfigErr = err }
+// the UI is running. A config that didn't load can't say the first-run
+// tour was already shown (and couldn't record it now), so the tour New
+// opened from the defaults is closed: a broken config.toml used to
+// re-show the tour on every launch. Someone with a config file to break
+// isn't on their first run.
+func (a *App) SetStartupConfigError(err error) {
+	a.startupConfigErr = err
+	if err != nil {
+		a.tour.Close()
+	}
+}
 
 // padToHeight extends `s` with trailing blank lines so its line
 // count is at least `n`. Screens whose body doesn't wrap in a
@@ -2128,7 +2169,7 @@ func (a App) renderStatusBar() string {
 		if !a.lastRefresh.IsZero() {
 			refreshed = a.lastRefresh.Format("15:04:05")
 		}
-		versionChip := a.styles.Muted.Render("v" + a.version)
+		versionChip := a.styles.Muted.Render(versionLabel(a.version))
 		if strings.Contains(a.version, "dirty") {
 			versionChip = a.styles.StatusWarning.Render(a.version)
 		}
@@ -2164,6 +2205,19 @@ func (a App) renderStatusBar() string {
 	}
 	line := a.styles.StatusBar.Render(body)
 	return forceSingleLine(line, a.width)
+}
+
+// versionLabel is the status bar's version chip: a "v" prefix for bare
+// release numbers, none for `git describe` output that already has one
+// (make builds showed "vv0.6.1-12-g…").
+func versionLabel(v string) string {
+	if v == "" || strings.HasPrefix(v, "v") || strings.HasPrefix(v, "V") {
+		return v
+	}
+	if v[0] < '0' || v[0] > '9' {
+		return v // "dev", a bare sha: not a version number
+	}
+	return "v" + v
 }
 
 // renderHelpLine renders the screen's bottom help row. The line is
@@ -2365,9 +2419,13 @@ func (a App) attachSelectedSession() (App, tea.Cmd) {
 			remoteArgs := tmux.AttachArgs(sel.Name, a.cfg.Sessions.DetachOthersOnAttach())
 			tick := a.startAttaching(attachKindRemote, sel.Host)
 			rt := &attachRemoteTarget{User: h.User, Host: h.Address, Port: h.EffectiveSSHPort()}
-			return a, tea.Batch(tick, tea.ExecProcess(
+			label := "ssh " + target
+			if h.Mosh {
+				label = "mosh " + target
+			}
+			return a, tea.Batch(tick, execAttach(
 				remoteattach.RunArgv(target, h.Mosh, h.EffectiveSSHPort(), append([]string{"tmux"}, remoteArgs...)),
-				func(err error) tea.Msg { return attachExitedMsg{Err: err, RemoteSSHTarget: rt} },
+				label, rt, false,
 			))
 		}
 	}
@@ -2426,9 +2484,7 @@ func (a App) attachSelectedSession() (App, tea.Cmd) {
 				rt.User = dial[:i]
 				rt.Host = dial[i+1:]
 			}
-			return a, tea.Batch(tick, tea.ExecProcess(cmd, func(err error) tea.Msg {
-				return attachExitedMsg{Err: err, RemoteSSHTarget: rt}
-			}))
+			return a, tea.Batch(tick, execAttach(cmd, "ssh "+dial, rt, false))
 		}
 	}
 
@@ -2768,6 +2824,15 @@ func (a App) resumeConversationCmd(c conversations.Conversation) tea.Cmd {
 		cmdline := joinShellArgs(argv) + " || zsh"
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		// A new session needs the conversation's folder: tmux would
+		// quietly start one whose folder is gone in $HOME, where the
+		// agent can't find the conversation. (A session an earlier
+		// resume left running is still attached to below.)
+		if has, _ := resumeTmuxHas(ctx, sessionName); !has {
+			if err := c.ValidateResumeFolder(); err != nil {
+				return conversationResumedMsg{Err: err}
+			}
+		}
 		if err := resumeTmuxNew(ctx, sessionName, c.Project, cmdline); err != nil {
 			// Resumed before and still running: attach to that
 			// session (as `ccmux resume` does) rather than failing
