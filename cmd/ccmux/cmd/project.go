@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"text/tabwriter"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -55,9 +54,11 @@ func runProjectCmd(name string) error {
 		return fmt.Errorf("no project named %q under %s", name, root)
 	}
 
-	fmt.Printf("%s\n%s\n\n", target.Name, target.Path)
+	// Directory, session and conversation names are all external text:
+	// sanitize before printing (see safeprint.go).
+	fmt.Printf("%s\n%s\n\n", safeField(target.Name), safeField(target.Path))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), listTmuxTimeout)
 	defer cancel()
 
 	// Running sessions whose working directory is the project folder.
@@ -73,12 +74,14 @@ func runProjectCmd(name string) error {
 		if s.Attached {
 			attached = "(attached)"
 		}
-		fmt.Fprintf(tw, "  %s\t%s\n", s.Name, attached)
+		fmt.Fprintf(tw, "  %s\t%s\n", safeField(s.Name), attached)
 		found++
 	}
 	tw.Flush()
 	if found == 0 {
-		fmt.Printf("  (none — `ccmux attach %s` starts one)\n", name)
+		// Quote the name: a project called "with space" printed a
+		// hint that attached to project "with".
+		fmt.Printf("  (none — `ccmux attach %s` starts one)\n", shellWord(name))
 	}
 
 	// Past conversations recorded against the project folder.
@@ -99,7 +102,7 @@ func runProjectCmd(name string) error {
 		if c.Project != target.Path {
 			continue
 		}
-		fmt.Fprintf(ctw, "  %s\t%s\t%s\n", agent.ByID(c.Agent).DisplayName(), c.ID, c.Preview)
+		fmt.Fprintf(ctw, "  %s\t%s\t%s\n", agent.ByID(c.Agent).DisplayName(), safeField(c.ID), safeField(c.Preview))
 		cfound++
 	}
 	ctw.Flush()

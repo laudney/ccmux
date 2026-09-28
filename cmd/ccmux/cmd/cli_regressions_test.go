@@ -397,6 +397,29 @@ func TestConversationIDs_TableFormRoundTrips(t *testing.T) {
 	}
 }
 
+// TestResume_TagsSessionInTheCreatingTmuxCall — `ccmux resume` ran
+// `new-session` and then a separate `set-option @ccmux_agent`; a daemon
+// poll tick in between classified the brand-new session with the
+// project's agent. The tag must be part of the new-session invocation
+// (tmux's `;` command separator), with no set-option call of its own.
+func TestResume_TagsSessionInTheCreatingTmuxCall(t *testing.T) {
+	e := newCLIEnv(t)
+	id := "3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b"
+	e.seedClaudeTranscript(id, "fix the login redirect")
+
+	res := e.run("", "resume", id)
+	if res.code != 0 {
+		t.Fatalf("resume exit %d\nstderr: %s", res.code, res.stderr)
+	}
+	name := conversations.ResumeSessionName(id)
+	if !hasCall(e.tmuxCallsWith("new-session"), "-s", name, ";", "set-option", "@ccmux_agent", "claude") {
+		t.Errorf("new-session for %s must carry the agent tag in the same call; tmux calls:\n%s", name, strings.Join(e.tmuxCalls(), "\n"))
+	}
+	if hasCall(e.tmuxCallsWith("set-option"), "@ccmux_agent") {
+		t.Errorf("a separate set-option @ccmux_agent call leaves the session untagged in between; tmux calls:\n%s", strings.Join(e.tmuxCalls(), "\n"))
+	}
+}
+
 // TestResume_AgentListCoversEveryAgent — the --agent help and the
 // unknown-agent error hard-coded seven agents, so every agent added
 // since (gemini, opencode, kiro, …) was missing from both.
@@ -421,6 +444,43 @@ func TestResume_AgentListCoversEveryAgent(t *testing.T) {
 }
 
 // --- ccmux mcp unregister / uninstall ----------------------------------------
+
+// TestMCPStatusAndRegister_ForeignEntry — `mcp status` called any
+// "ccmux" entry registered and `mcp register --allow-mutate` overwrote
+// one that runs some other server. Status must say it isn't ccmux-mcp;
+// register must refuse without --force and replace it with it.
+func TestMCPStatusAndRegister_ForeignEntry(t *testing.T) {
+	e := newCLIEnv(t)
+	cfgPath := filepath.Join(e.home, ".claude.json")
+	body := `{"mcpServers":{"ccmux":{"type":"stdio","command":"/opt/tools/my-ccmux-bridge"}}}`
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st := e.run("", "mcp", "status")
+	if st.code != 0 || !strings.Contains(st.stdout, "NOT registered") || !strings.Contains(st.stdout, "my-ccmux-bridge") {
+		t.Errorf("mcp status (exit %d) should report the foreign entry as not ccmux-mcp:\n%s%s", st.code, st.stdout, st.stderr)
+	}
+
+	reg := e.run("", "mcp", "register", "--allow-mutate")
+	if reg.code == 0 {
+		t.Errorf("register over a foreign entry should fail without --force:\n%s", reg.stdout)
+	}
+	if raw, _ := os.ReadFile(cfgPath); string(raw) != body {
+		t.Errorf("register without --force changed ~/.claude.json:\n%s", raw)
+	}
+
+	forced := e.run("", "mcp", "register", "--allow-mutate", "--force")
+	if forced.code != 0 {
+		t.Fatalf("register --force exit %d\n%s%s", forced.code, forced.stdout, forced.stderr)
+	}
+	if raw, _ := os.ReadFile(cfgPath); !strings.Contains(string(raw), `"ccmux-mcp"`) {
+		t.Errorf("register --force didn't install ccmux-mcp:\n%s", raw)
+	}
+	if st := e.run("", "mcp", "status"); !strings.Contains(st.stdout, "✓ ccmux-mcp is registered") {
+		t.Errorf("after --force, status = %s", st.stdout)
+	}
+}
 
 // TestMCPUnregister_RemovesEntryKeepsTheRest — `ccmux mcp unregister`
 // (no claude CLI on PATH, so it edits ~/.claude.json directly) removes

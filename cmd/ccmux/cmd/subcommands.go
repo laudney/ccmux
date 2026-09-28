@@ -186,7 +186,7 @@ func newNewCmd() *cobra.Command {
 		Use:   "new <name>",
 		Short: "Create a project directory and start its agent session",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(c *cobra.Command, args []string) error {
 			cfg, _ := config.Load()
 			if err := project.ValidateName(args[0]); err != nil {
 				return err
@@ -208,11 +208,28 @@ func newNewCmd() *cobra.Command {
 				return err
 			}
 			opts.Agent = id
-			session, err := scaffold.StartSession(context.Background(), opts)
+			// A project whose session is already running used to fail
+			// with tmux's raw "duplicate session: c-alpha". Say what's
+			// going on and how to get to it — `new` doesn't attach to an
+			// existing session on its own, since it may be running a
+			// different agent than --agent asks for.
+			ctx := context.Background()
+			running := tmux.SessionNameForPath(opts.Dir)
+			alreadyRunning := func() error {
+				return fmt.Errorf("project %s already has a running session (%s); attach with: ccmux attach %s",
+					shellWord(args[0]), safeField(running), shellWord(args[0]))
+			}
+			if live, _ := tmux.Has(ctx, running); live {
+				return alreadyRunning()
+			}
+			session, err := scaffold.StartSession(ctx, opts)
 			if err != nil {
+				if live, _ := tmux.Has(ctx, running); live {
+					return alreadyRunning() // lost a race with another start
+				}
 				return err
 			}
-			return attachWithChrome(session, args[0], false)
+			return attachAfterStart(c.OutOrStdout(), session, args[0], false, true)
 		},
 	}
 	c.Flags().StringVar(&agentFlag, "agent", "",
@@ -249,12 +266,21 @@ func agentIDList() string {
 	return strings.Join(ids, ", ")
 }
 
+// listTmuxTimeout bounds the tmux calls behind `ccmux list`'s daemon-down
+// fallback and `ccmux project`'s session listing — a hang guard.
+const listTmuxTimeout = 15 * time.Second
+
 // newListCmd: `ccmux list [--json]` — list sessions.
 func newListCmd() *cobra.Command {
 	var asJSON bool
 	c := &cobra.Command{
 		Use:   "list",
-		Short: "List Claude sessions",
+		Short: "List running sessions (every agent, plus bare shells)",
+		Long: `List the tmux sessions ccmux knows about on this device — every agent's
+sessions and bare shells — with the state ccmuxd classified them in.
+
+When ccmuxd isn't running (or doesn't answer), the list comes straight
+from tmux instead, and STATE is "unknown": only the daemon classifies.`,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
@@ -267,8 +293,11 @@ func newListCmd() *cobra.Command {
 			if sessions == nil {
 				// The tmux fallback gets its own budget: a daemon that
 				// accepted the connection and then hung has spent all
-				// of ctx, and reusing it failed the fallback too.
-				tctx, tcancel := context.WithTimeout(context.Background(), 3*time.Second)
+				// of ctx, and reusing it failed the fallback too. It
+				// only guards against a wedged tmux server, so it's
+				// generous: a loaded machine can take seconds just to
+				// start the tmux client, and 3s made `list` fail there.
+				tctx, tcancel := context.WithTimeout(context.Background(), listTmuxTimeout)
 				defer tcancel()
 				ts, err := tmux.List(tctx)
 				if err != nil {
@@ -278,6 +307,10 @@ func newListCmd() *cobra.Command {
 					sessions = append(sessions, daemon.SessionState{
 						Name: t.Name, Host: "local", Path: t.Path, Windows: t.Windows, Attached: t.Attached,
 						Created: t.Created, LastChange: t.LastAttach,
+						// Only the daemon classifies; say so rather than
+						// emitting state "" (not a value the protocol
+						// defines).
+						State: string(agent.StateUnknown),
 					})
 				}
 			}
@@ -292,7 +325,9 @@ func newListCmd() *cobra.Command {
 			tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 			fmt.Fprintln(tw, "NAME\tHOST\tSTATE\tPATH")
 			for _, s := range sessions {
-				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", s.Name, s.Host, s.State, s.Path)
+				// Session names and paths are whatever tmux (or a
+				// peer's daemon) reports — sanitize (see safeprint.go).
+				fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", safeField(s.Name), safeField(s.Host), safeField(s.State), safeField(s.Path))
 			}
 			return tw.Flush()
 		},
@@ -379,7 +414,7 @@ func printDoctorDetail(detail string) {
 	if detail == "" {
 		return
 	}
-	for _, ln := range strings.Split(detail, "\n") {
+	for _, ln := range strings.Split(safeText(detail), "\n") {
 		fmt.Println("      ↳ " + ln)
 	}
 }
@@ -530,7 +565,7 @@ func runDoctor() error {
 		if who == "" {
 			who = "(login parsed empty, but gh auth status is happy)"
 		}
-		fmt.Printf("  ✓ gh authenticated as %s\n", who)
+		fmt.Printf("  ✓ gh authenticated as %s\n", safeField(who))
 	case ghauth.StateNotAuthed:
 		fmt.Println("  · " + gh.Hint())
 		printDoctorDetail(gh.Detail)
@@ -862,7 +897,7 @@ func newDaemonCmd() *cobra.Command {
 					return nil
 				}
 				fmt.Printf("\nIPC: online (host=%s version=%s sessions=%d sleep_mode=%s)\n",
-					h.Hostname, h.Version, h.Sessions, h.SleepMode)
+					safeField(h.Hostname), safeField(h.Version), h.Sessions, safeField(h.SleepMode))
 				return nil
 			},
 		},
@@ -1000,33 +1035,7 @@ func newHostCmd() *cobra.Command {
 	c := &cobra.Command{Use: "host", Short: "Manage remote ccmuxd hosts"}
 
 	c.AddCommand(
-		&cobra.Command{
-			Use:   "add <name> <address>",
-			Short: "Add a remote ccmuxd host",
-			Args:  cobra.ExactArgs(2),
-			RunE: func(_ *cobra.Command, args []string) error {
-				// Abort on a Load error instead of proceeding: Load
-				// returns Defaults() alongside the error on a corrupt or
-				// unreadable config.toml, and Save truncates the file —
-				// so swallowing the error would wipe every other host and
-				// all other settings on the next write.
-				cfg, err := config.Load()
-				if err != nil {
-					return fmt.Errorf("load config (not modifying it): %w", err)
-				}
-				// Reject duplicate names instead of silently appending:
-				// `host remove <name>` deletes every entry with that
-				// name, so a duplicate add would make the eventual
-				// remove wipe both — including the original.
-				for _, h := range cfg.Hosts {
-					if h.Name == args[0] {
-						return fmt.Errorf("host %q already exists (address %s); run `ccmux host remove %s` first, or pick a different name", args[0], h.Address, args[0])
-					}
-				}
-				cfg.Hosts = append(cfg.Hosts, config.Host{Name: args[0], Address: args[1], Mosh: true, Port: 7474})
-				return config.Save(cfg)
-			},
-		},
+		newHostAddCmd(),
 		&cobra.Command{
 			Use:   "remove <name>",
 			Short: "Remove a remote ccmuxd host",
@@ -1062,7 +1071,7 @@ func newHostCmd() *cobra.Command {
 				tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 				fmt.Fprintln(tw, "NAME\tADDRESS\tUSER\tMOSH")
 				for _, h := range cfg.Hosts {
-					fmt.Fprintf(tw, "%s\t%s\t%s\t%v\n", h.Name, h.Address, h.User, h.Mosh)
+					fmt.Fprintf(tw, "%s\t%s\t%s\t%v\n", safeField(h.Name), safeField(h.Address), safeField(h.User), h.Mosh)
 				}
 				return tw.Flush()
 			},

@@ -41,7 +41,7 @@ Codex, Cursor, and any other MCP-aware client follow the same shape — point a 
 Two paths register it for you:
 
 - **Setup wizard.** `ccmux setup` includes a "ccmux-mcp registration (Claude Code)" step that detects Claude Code and offers to register the entry — with a follow-up prompt for `--allow-mutate`. Idempotent; re-running detects the existing registration and reports the mode.
-- **CLI.** `ccmux mcp register [--allow-mutate]` does the same thing without the wizard chrome (re-running with the other mode switches it). `ccmux mcp status` reports whether ccmux is registered in `~/.claude.json` and in which mode.
+- **CLI.** `ccmux mcp register [--allow-mutate]` does the same thing without the wizard chrome (re-running with the other mode switches it). `ccmux mcp status` reports whether ccmux is registered in `~/.claude.json` and in which mode. Only an entry that runs `ccmux-mcp` counts: a `ccmux` entry that runs something else is reported as such, left alone by the wizard, and replaced by `ccmux mcp register` only with `--force`.
 
 `ccmux mcp unregister` is the inverse: `claude mcp remove --scope user ccmux` when the CLI is on PATH, otherwise the same backed-up direct edit of `~/.claude.json`. It only removes an entry that runs `ccmux-mcp`, and is a no-op when nothing is registered. `ccmux uninstall` runs it, so removing ccmux doesn't leave Claude Code trying to start a deleted binary.
 
@@ -55,7 +55,7 @@ CCMUX_HOST=mini.tail-xxxxx.ts.net:7474 ccmux-mcp
 ccmux-mcp --host mini.tail-xxxxx.ts.net:7474
 ```
 
-When `--host` is set, the server talks to that ccmuxd over HTTP on the tailnet instead of the local Unix socket. Useful when the agent runs on the laptop but should orchestrate sessions on the Mac mini.
+When `--host` is set, the server talks to that ccmuxd over HTTP on the tailnet instead of the local Unix socket. Useful when the agent runs on the laptop but should orchestrate sessions on the Mac mini. The value is `host` or `host:port` (the port defaults to 7474); an `http://` prefix and a trailing `/` are accepted and stripped, while `https://` or a path is refused — ccmuxd serves plain HTTP on the tailnet.
 
 ## Tools
 
@@ -80,7 +80,7 @@ When `--host` is set, the server talks to that ccmuxd over HTTP on the tailnet i
 | ------------------- | ------------------------------------------------------------------------------------------------------------ |
 | `spawn_session`     | start a new agent session in an existing project (same shape as the TUI's Projects → `n` flow)               |
 | `spawn_bare_session`| start a project-less session (just `$SHELL` or an agent at a path)                                           |
-| `send_keys`         | type a literal keystroke string into a session's pane (tmux interprets `Enter`, `C-c`, etc.)                 |
+| `send_keys`         | type into a session's pane: `keys` is either literal text or exactly one tmux key name (`Enter`, `C-c`, …) — type text, then send `Enter` in a second call to submit it |
 | `kill_session`      | terminate a tmux session                                                                                     |
 
 Tools are listed in alphabetical order via `tools/list`. Mutating tools are not just guarded — they're absent from the tools list entirely when `--allow-mutate` is off, so an agent can't surface them in its own UI even if a user toggled the flag in a config file.
@@ -90,7 +90,8 @@ Tools are listed in alphabetical order via `tools/list`. Mutating tools are not 
 - **Transport.** stdio is the only transport. The Unix socket the daemon listens on is filesystem-permission scoped to the user; tailnet HTTP requires being on the tailnet. ccmux-mcp inherits whichever the daemon is.
 - **Mutation.** Off by default. The `--allow-mutate` flag is the only way to expose `spawn_session` / `send_keys` / `kill_session`. There is no per-tool override.
 - **Bound input.** `read_pane` caps the requested line count at 500 so a buggy or malicious agent can't drag the daemon down by requesting full scrollback every call.
-- **Per-call deadline.** Every handler runs under a 30-second context — well above legitimate work, well below "hangs the stdio loop."
+- **Per-call deadline.** Every handler runs under a 30-second context — well above legitimate work. `get_daemon_health`, the first probe, gets 5 seconds so a hung daemon is reported quickly.
+- **Concurrency.** Tool calls run concurrently (at most 16 at once; past that the server stops reading until one finishes), so one call stuck on a hung daemon never holds up the rest: `ping`, `initialize`, `tools/list` and protocol errors are answered inline, immediately. Read-only calls run in parallel; a mutating call waits for every call received before it, and every later call waits for it, so pipelined mutations keep their order. `notifications/cancelled` cancels the named in-flight call, which then gets no response (per MCP).
 
 ## Wire shapes
 
@@ -134,17 +135,22 @@ Request:
 }
 ```
 
-`arguments` is optional: a missing or `null` value is treated as `{}`.
+`arguments` is optional: a missing or `null` value is treated as `{}`. Any other non-object value (a string, an array) is `-32602`. Unknown fields inside the object are ignored rather than refused, despite the schemas' `additionalProperties: false`: some clients pad calls to parameterless tools with a dummy argument.
+
+### Request validation
+
+A request without a `method` is `-32600` (Invalid Request), as is one whose `id` is an object, array or boolean (answered with `"id": null`). A response object sent by the client (`result`/`error`, no `method`) is dropped — the server never sends requests, so there is nothing to match it to. Blank and whitespace-only lines are ignored. `resources/list` and `prompts/list` answer `{"resources": []}` and `{"prompts": []}` so clients that probe them don't log errors.
 
 Result: one `content` block of type `text` whose body is the JSON-encoded tool output (pretty-printed). Tool-execution failures are returned as `isError: true` on the result, NOT as a JSON-RPC error — agents distinguish "I called the wrong tool or passed bad arguments" (`error.code = -32602`, per the MCP spec — including an unknown or `--allow-mutate`-gated tool name) from "the tool ran but failed" (`result.isError = true`).
 
 ### Batches
 
-A line holding a JSON array is a JSON-RPC 2.0 batch (protocol 2025-03-26 requires servers to accept them). The reply is one array frame with a response per request, in order; notifications get none, an all-notification batch gets no reply, and `[]` gets a single `-32600` error.
+A line holding a JSON array is a JSON-RPC 2.0 batch (protocol 2025-03-26 requires servers to accept them). The reply is one array frame with a response per request, in order, written once every call in it has finished (its tool calls run concurrently, under the same ordering rules as separate frames); notifications get none, an all-notification batch gets no reply, and `[]` gets a single `-32600` error.
 
 ## Testing
 
 - `cmd/ccmux-mcp/server_test.go` — protocol-level tests: handshake, ping, parse errors, notifications, unknown method, mutate gating, argument validation, tools list ordering.
+- `cmd/ccmux-mcp/concurrency_test.go` — the dispatcher against a daemon that hangs on demand: a ping or `notifications/cancelled` behind a hung call is handled at once, read-only calls overlap, mutations keep wire order, the in-flight bound holds, and the health probe fails fast.
 - `cmd/ccmux-mcp/handlers_test.go` — per-tool tests against a `fakeClient` that records every daemon call. Confirms argument forwarding, nil-safety, and `lines` capping for `read_pane`.
 - `internal/e2e/mcp_test.go` (`//go:build integration`) — spawns the real `ccmux-mcp` binary against a real ccmuxd in the isolated `TMUX_TMPDIR` sandbox. Runs `initialize` → `tools/list` → `tools/call list_sessions` end-to-end and confirms a live tmux session appears in the result. Mutate-gate-off path is pinned end-to-end too.
 

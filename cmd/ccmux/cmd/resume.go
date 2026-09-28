@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -145,7 +146,7 @@ func pickByID(list []conversations.Conversation, id string) (conversations.Conve
 	var b strings.Builder
 	fmt.Fprintf(&b, "conversation id %q is ambiguous — it matches %d conversations:", id, len(matches))
 	for _, c := range matches {
-		fmt.Fprintf(&b, "\n  %s  %s", c.ID, c.Agent)
+		fmt.Fprintf(&b, "\n  %s  %s", safeField(c.ID), safeField(string(c.Agent)))
 		if c.Preview != "" {
 			fmt.Fprintf(&b, "  %q", truncateRunes(c.Preview, 50))
 		}
@@ -210,7 +211,7 @@ func resumeNow(target conversations.Conversation) error {
 	if target.Project != "" {
 		label = filepath.Base(target.Project)
 	}
-	return attachWithChrome(sessionName, label, detachOthers)
+	return attachAfterStart(os.Stdout, sessionName, label, detachOthers, !existed)
 }
 
 // ensureResumeSession creates the tmux session that resumes target —
@@ -218,31 +219,45 @@ func resumeNow(target conversations.Conversation) error {
 // uses — or, when that session already exists (the conversation was
 // resumed earlier and is still running), reports existed=true so the
 // caller attaches to it instead of failing.
+//
+// A new session gets its agent tag from the same tmux invocation that
+// creates it (tmux.NewWithAgent). Tagging it with a second call left a
+// window in which a daemon poll tick classified the session with its
+// project's agent's rules — a resumed Codex conversation in a Claude
+// project read as a crashed Claude.
 func ensureResumeSession(ctx context.Context, target conversations.Conversation, cmdline string) (name string, existed bool, err error) {
 	name = conversations.ResumeSessionName(target.ID)
-	if err := resumeTmuxNew(ctx, name, target.Project, cmdline); err != nil {
+	tag := string(target.Agent)
+	if live, _ := resumeTmuxHas(ctx, name); live {
+		// Resumed earlier and still running. Re-applying the tag is
+		// idempotent and covers a session an older ccmux left untagged.
+		if err := resumeTmuxSetAgent(ctx, name, tag); err != nil {
+			return "", false, fmt.Errorf("tag tmux session %s with its agent: %w", name, err)
+		}
+		return name, true, nil
+	}
+	if err := resumeTmuxNew(ctx, name, target.Project, cmdline, tag); err != nil {
 		if has, _ := resumeTmuxHas(ctx, name); !has {
 			return "", false, fmt.Errorf("create tmux session: %w", err)
 		}
-		existed = true
-	}
-	if err := resumeTmuxSetAgent(ctx, name, string(target.Agent)); err != nil {
-		// Don't leave an untagged session behind that the next resume
-		// would silently reuse — but only kill one this call created
-		// (as the TUI does), never a session that was already running.
-		if !existed {
+		// The session exists after all: either a concurrent resume won
+		// the race, or new-session ran and the set-option half of the
+		// same invocation failed. Tag it now; if that fails too, don't
+		// leave an untagged session behind for the next resume to reuse.
+		if terr := resumeTmuxSetAgent(ctx, name, tag); terr != nil {
 			_ = resumeTmuxKill(ctx, name)
+			return "", false, fmt.Errorf("tag tmux session %s with its agent: %w (create: %v)", name, terr, err)
 		}
-		return "", false, fmt.Errorf("tag tmux session %s with its agent: %w", name, err)
+		return name, true, nil
 	}
-	return name, existed, nil
+	return name, false, nil
 }
 
 // The tmux calls ensureResumeSession makes — package-level seams so
 // tests can drive the create / already-exists paths without a tmux
 // server.
 var (
-	resumeTmuxNew      = tmux.New
+	resumeTmuxNew      = tmux.NewWithAgent
 	resumeTmuxHas      = tmux.Has
 	resumeTmuxSetAgent = tmux.SetSessionAgent
 	resumeTmuxKill     = tmux.Kill
