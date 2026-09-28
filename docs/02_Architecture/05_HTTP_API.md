@@ -473,15 +473,31 @@ turn of its own. The evidence, per poll tick:
   evidence count. This generic fallback can't tell output from typing:
   typing into such an agent before it has shown a spinner notifies, and
   once it has, a turn that starts and ends between two polls is missed.
+  The session itself remembers which agent has shown a spinner there
+  (the tmux user option `@ccmux_spinner`), so a daemon restart doesn't
+  forget it.
 
 Nothing else is a turn: a pane resize or redraw, the user typing, an
 agent starting up (a session created while the daemon runs, or an agent
 started by hand in a shell session — see `GET /v1/sessions`' `agent`),
 or relaunching a crashed agent. A session the daemon first sees already
 running — after a daemon restart, or renamed directly in tmux — is
-recorded as it stands and stays quiet until it first settles: the end of
-a turn it was caught in the middle of, or a crash, is published but not
-announced. Its next turn is.
+recorded as it stands (a session waiting for input shows `needs_input`
+from that first look; one whose body shows a turn running, `active`) and
+stays quiet until the daemon has seen it settle: in `needs_input`,
+`idle` or `error`, with its pane unchanged for a whole idle threshold
+since that first look, and any spinner title that look found gone or
+unchanged for the spinner's stale window (a spinner whose frames cycle
+in step with the poll interval reads the same on every tick). The end
+of a turn it was caught in the middle of, or a crash, is published but
+not announced. That holds even when
+the first look reads as settled: one capture can't tell a turn in
+flight whose only signs are a spinner title (not believed on a first
+look) or output still to come from a session waiting, so a turn started
+within an idle threshold of the first look isn't announced either —
+except in a session whose agent is known to show a spinner title while
+it works (`@ccmux_spinner`) and shows none on that first look: it isn't
+working, so a settled first look is believed. Its next turn is.
 
 ---
 
