@@ -576,6 +576,11 @@ type server struct {
 	// restarted daemon reads it back rather than learning it again (see
 	// spinnerMarkDue in poll.go). nil skips recording.
 	markSpinner func(ctx context.Context, name, agentID string) error
+	// markReview writes a session's review record — its reviewed flag,
+	// prompt count and state (tmux.SetSessionReview) — so a restarted
+	// daemon, or one that finds the session renamed behind its back,
+	// reads them back (see reviewDue in poll.go). nil skips recording.
+	markReview func(ctx context.Context, name string, r tmux.Review) error
 
 	// Session-handler seams, defaulted to tmux.Has / tmux.Kill /
 	// tmux.Rename so the create/kill/rename handlers' bookkeeping is
@@ -669,6 +674,7 @@ func newServer(cfg config.Config) *server {
 		sendKeysPane:    tmux.SendKeysPane,
 		sendKeys:        tmux.SendKeys,
 		markSpinner:     tmux.SetSessionSpinner,
+		markReview:      tmux.SetSessionReview,
 		detectMoshi:     moshi.Detect,
 		bell:            notificationBell(cfg.Notifications),
 		readAgent:       project.ReadAgent,
@@ -791,8 +797,11 @@ func (s *server) listSessions(w http.ResponseWriter, r *http.Request) {
 			// A session the poll loop hasn't tickled yet: treat as
 			// seen=true (nothing for the user to review yet) rather
 			// than implicitly unseen, otherwise restarting ccmuxd
-			// would resurface every old session as "needs attention".
+			// would resurface every old session as "needs attention" —
+			// unless the session carries a daemon's review record,
+			// which the poll loop's first look will read back too.
 			t = &tracked{state: agent.StateUnknown, seen: true}
+			t.restoreReview(ts)
 		}
 		// For sessions we've seen via the poll loop this is already
 		// populated. For pre-existing sessions (e.g. the daemon just
@@ -1396,6 +1405,7 @@ func (s *server) sendKeysToAgent(ctx context.Context, name, keys string) error {
 func sessionNotFound(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "can't find session") ||
+		strings.Contains(msg, "no such session") || // set-option's wording
 		strings.Contains(msg, "no current session") ||
 		strings.Contains(msg, "no server running") ||
 		(strings.Contains(msg, "error connecting to") && strings.Contains(msg, "No such file or directory"))
@@ -1661,10 +1671,11 @@ func peerInfos(scan tailnet.Scan, port int) []daemon.PeerInfo {
 }
 
 // handleUsage returns per-agent token + cost activity over a rolling
-// window (default 5 hours, override via ?window=2h, 24h, 30m, …). The
-// walkers are best-effort: a missing or corrupt transcript on one
-// agent doesn't sink the others. iOS uses this for its dashboard
-// usage card.
+// window (default 5 hours, override via ?window=2h, 24h, 30m, …), plus
+// Claude's current 5-hour session block (claude_block), which the
+// window doesn't change. The walkers are best-effort: a missing or
+// corrupt transcript on one agent doesn't sink the others. iOS uses
+// this for its dashboard usage card.
 func (s *server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1677,11 +1688,13 @@ func (s *server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	var (
 		wg                 sync.WaitGroup
 		claude, codex, ant usage.AgentSummary
+		block              *daemon.ClaudeBlock
 		others             []usage.NamedSummary
 		orSpend            daemon.OpenRouterSpend
 	)
-	wg.Add(5)
+	wg.Add(6)
 	go func() { defer wg.Done(); claude, _ = usage.WalkClaude(window) }()
+	go func() { defer wg.Done(); block = claudeBlock() }()
 	go func() { defer wg.Done(); codex, _ = usage.WalkCodex(window) }()
 	go func() { defer wg.Done(); ant, _ = usage.WalkAntigravity(window) }()
 	go func() { defer wg.Done(); others = usage.WalkOthers(window) }()
@@ -1693,7 +1706,34 @@ func (s *server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		Antigravity: toUsageSummary(ant),
 		OpenRouter:  orSpend,
 		Others:      toOtherUsage(others),
+		ClaudeBlock: block,
 	})
+}
+
+// claudeBlock reads Claude's current session block the way the TUI's
+// usage panel does (usage.WalkClaudeBlock), for /v1/usage: the phone's
+// usage card and `ccmux usage` showed a rolling window that disagreed
+// with the TUI's quota bar about tokens, cost and the reset time. nil
+// when the transcripts can't be read.
+func claudeBlock() *daemon.ClaudeBlock {
+	agg, err := usage.WalkClaudeBlock()
+	if err != nil {
+		return nil
+	}
+	b := usage.ClaudeBlockOf(agg)
+	return &daemon.ClaudeBlock{
+		Active:              b.Active,
+		Start:               b.Start,
+		ResetAt:             b.ResetAt,
+		BlockSeconds:        int(b.Length / time.Second),
+		Prompts:             b.Prompts,
+		Messages:            b.Messages,
+		InputTokens:         b.Tokens.Input,
+		OutputTokens:        b.Tokens.Output,
+		CacheCreationTokens: b.Tokens.CacheCreation,
+		CacheReadTokens:     b.Tokens.CacheRead,
+		EstimatedCost:       b.EstimatedCost,
+	}
 }
 
 // toOtherUsage maps the generic per-agent summaries to the wire shape.

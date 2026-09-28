@@ -19,7 +19,7 @@ type SessionState struct {
 	Windows     int       `json:"windows"`      // tmux window count
 	Created     time.Time `json:"created"`      // session creation time
 	LastChange  time.Time `json:"last_change"`  // pane content last changed
-	PromptCount int       `json:"prompt_count"` // # of times we've seen a needs-input transition
+	PromptCount int       `json:"prompt_count"` // turns ended in needs_input; kept on the session, like Seen
 	// Agent is the AI agent driving this session, sourced from the
 	// project's .ccmux/agent sidecar. One of "claude" / "codex" /
 	// "antigravity" / "gemini". Empty for sessions
@@ -34,7 +34,10 @@ type SessionState struct {
 	// rollup (needs_input > unseen-idle > working > seen-idle > unknown)
 	// and the bell/push suppression for the currently-attached session.
 	// Defaults to true (a session you've never had output from is by
-	// definition reviewed-empty, not unreviewed).
+	// definition reviewed-empty, not unreviewed). The daemon records it
+	// on the tmux session (with PromptCount) and reads it back after a
+	// restart, as long as the session is still in the state it was
+	// recorded in.
 	Seen bool `json:"seen"`
 }
 
@@ -249,6 +252,38 @@ type AgentUsage struct {
 	// for a user who only runs Claude/Codex. Additive: existing clients
 	// that ignore this field keep working.
 	Others []OtherUsage `json:"others,omitempty"`
+	// ClaudeBlock is Claude's current 5-hour session block, counted
+	// exactly as the TUI's quota bar counts it. Claude above covers a
+	// plain rolling window (window_seconds), which reports different
+	// tokens, cost and no reset time. Additive: nil (omitted) when the
+	// transcripts couldn't be read, and from daemons that predate it.
+	ClaudeBlock *ClaudeBlock `json:"claude_block,omitempty"`
+}
+
+// ClaudeBlock is Claude's subscription session block (Pro/Max's
+// "5-hour limit"), returned in AgentUsage: the block that is running,
+// the way ccusage and the TUI's usage panel compute it. A block starts
+// at the hour its first message fell in and lasts block_seconds;
+// everything sent inside it counts against it.
+type ClaudeBlock struct {
+	// Active is false when no block is running (idle for a while, or the
+	// last one ran out); the counts are then zero, and the next message
+	// opens a new block.
+	Active bool `json:"active"`
+	// Start is the block's hour-floored start; ResetAt is its end, when
+	// the quota resets. Both omitted when no block is active.
+	Start        time.Time `json:"start,omitzero"`
+	ResetAt      time.Time `json:"reset_at,omitzero"`
+	BlockSeconds int       `json:"block_seconds"`
+	// Prompts is what the TUI's quota bar counts: prompts the user sent
+	// in the block. Messages is the assistant responses in it.
+	Prompts             int     `json:"prompts"`
+	Messages            int     `json:"messages"`
+	InputTokens         int     `json:"input_tokens"`
+	OutputTokens        int     `json:"output_tokens"`
+	CacheCreationTokens int     `json:"cache_creation_tokens"`
+	CacheReadTokens     int     `json:"cache_read_tokens"`
+	EstimatedCost       float64 `json:"estimated_cost"` // USD at published API rates
 }
 
 // OtherUsage is one second-wave agent's usage row.

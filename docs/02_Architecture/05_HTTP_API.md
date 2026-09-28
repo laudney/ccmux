@@ -154,6 +154,17 @@ List every tmux session this daemon manages, with daemon-derived state.
   `c-` session its project's recorded agent; any other session (tagged
   `shell`, or made outside ccmux) is `shell` unless an agent is running
   in its foreground right now, in which case it is that agent.
+- `prompt_count` and `seen` survive a daemon restart (`ccmux update`, a
+  brew upgrade) and a rename done straight through tmux. The daemon keeps
+  them on the session itself, as the tmux user options `@ccmux_seen`,
+  `@ccmux_prompts` and `@ccmux_state` (the state they were written in),
+  rewritten only when one of them changes. Its first look at a session
+  reads them back: the prompt count as recorded, and the reviewed flag as
+  recorded while the session is still in that state. A session whose
+  state changed while no daemon watched it (a turn that was running when
+  the daemon stopped has ended since) is judged as it stands instead:
+  waiting for input means unreviewed. A plain shell session with nothing
+  to remember gets no record.
 
 #### `POST /v1/sessions`
 Create-or-attach a **project-bound** agent session (idempotent on the tmux
@@ -268,11 +279,33 @@ daemon's home dir, most-recent first. Headless/SDK runs excluded.
   you'd pass to its `--resume`).
 
 #### `GET /v1/usage`
-Per-agent token + cost activity over a rolling window.
+Per-agent token + cost activity over a rolling window, plus Claude's current
+5-hour session block.
 - **Query:** `?window=<Go duration>` e.g. `2h`, `24h`, `30m` (default `5h`,
-  clamped to `744h` / 31 days).
+  clamped to `744h` / 31 days). It sizes the per-agent summaries only.
 - **Response `200`:** `AgentUsage`. Best-effort per agent; `estimated_cost`
   is USD at published API rates.
+- `claude_block` is the block the TUI's quota bar and "resets in" line
+  show: Anthropic's Pro/Max "5-hour limit", computed the way ccusage
+  computes it. A block starts at the hour its first message fell in
+  (floored to the UTC hour), lasts `block_seconds` (18000), and a message
+  more than that after its start opens the next one. `reset_at` is when
+  the quota resets. The `claude` summary next to it covers the plain
+  rolling window instead, so it reports different prompts, tokens and
+  cost, and has no reset time. `active: false` means no block is running
+  (idle for 5 hours, or the last block ran out): `start` and `reset_at`
+  are omitted, everything is 0, and the next message opens a new block.
+  `claude_block` is absent when the transcripts can't be read, and from
+  daemons older than this field.
+
+```json
+"claude_block": {
+  "active": true, "start": "2026-09-28T13:00:00Z", "reset_at": "2026-09-28T18:00:00Z",
+  "block_seconds": 18000, "prompts": 6, "messages": 14,
+  "input_tokens": 60, "output_tokens": 12, "cache_creation_tokens": 600, "cache_read_tokens": 6000,
+  "estimated_cost": 0.03
+}
+```
 
 #### `GET /v1/notes`
 List a project's markdown vault, or (with `&file=`) read one file.
@@ -375,6 +408,8 @@ Stream of session lifecycle/state events; subscribe to live-update a view.
   `state_change` with its current state, and triggers no bell or push
   until it has settled once — the end of whatever it was in the middle
   of isn't announced (see "What counts as a turn" under Pairing & push).
+  Its `prompt_count` and `seen` come from the record kept on the session
+  (see `GET /v1/sessions`), not from zero.
 - Heartbeats: `: connected` on open, `: ping` comment every 20s — comment
   lines (leading `:`) are ignorable.
 - If the per-subscriber buffer (256) overflows you get an
@@ -517,8 +552,9 @@ type SessionState struct {
 	Windows     int       `json:"windows"`
 	Created     time.Time `json:"created"`
 	LastChange  time.Time `json:"last_change"`  // pane content last changed
-	PromptCount int       `json:"prompt_count"` // # needs-input transitions seen
+	PromptCount int       `json:"prompt_count"` // turns that ended in needs_input; kept across restarts
 	Agent       string    `json:"agent,omitempty"`
+	Seen        bool      `json:"seen"`         // the user has reviewed the latest prompt; kept across restarts
 }
 
 // GET /v1/health
@@ -604,9 +640,25 @@ type Conversation struct {
 
 // GET /v1/usage
 type AgentUsage struct {
-	Claude      UsageSummary `json:"claude"`
-	Codex       UsageSummary `json:"codex"`
-	Antigravity UsageSummary `json:"antigravity"`
+	Claude      UsageSummary    `json:"claude"`
+	Codex       UsageSummary    `json:"codex"`
+	Antigravity UsageSummary    `json:"antigravity"`
+	OpenRouter  OpenRouterSpend `json:"openrouter"`
+	Others      []OtherUsage    `json:"others,omitempty"`
+	ClaudeBlock *ClaudeBlock    `json:"claude_block,omitempty"` // Claude's 5-hour session block
+}
+type ClaudeBlock struct {
+	Active              bool      `json:"active"`
+	Start               time.Time `json:"start,omitzero"`    // hour-floored block start
+	ResetAt             time.Time `json:"reset_at,omitzero"` // block end: the quota resets
+	BlockSeconds        int       `json:"block_seconds"`
+	Prompts             int       `json:"prompts"`  // what the TUI's quota bar counts
+	Messages            int       `json:"messages"` // assistant responses
+	InputTokens         int       `json:"input_tokens"`
+	OutputTokens        int       `json:"output_tokens"`
+	CacheCreationTokens int       `json:"cache_creation_tokens"`
+	CacheReadTokens     int       `json:"cache_read_tokens"`
+	EstimatedCost       float64   `json:"estimated_cost"` // USD
 }
 type UsageSummary struct {
 	HasData       bool    `json:"has_data"`
