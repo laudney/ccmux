@@ -4,9 +4,9 @@
 //     walker). The dashboard's main Claude panel reads the 5h session
 //     block for its quota bar + per-project drill-down through
 //     WalkClaudeBlock, the same walk the daemon reports as claude_block.
-//   - Codex: internal/codexusage. Antigravity, Gemini, Muse: their own
-//     walkers below. The remaining agents go through the generic
-//     JSONL walker in internal/agentusage (WalkOthers).
+//   - Codex: internal/codexusage. Antigravity, Gemini, Muse, Maki:
+//     their own walkers below. The remaining agents go through the
+//     generic JSONL walker in internal/agentusage (WalkOthers).
 //
 // The dashboard uses this package to render compact per-agent rows
 // beneath the Claude panel so users adopting Codex / Antigravity see
@@ -33,6 +33,7 @@ import (
 	"github.com/skzv/ccmux/internal/claudeusage"
 	"github.com/skzv/ccmux/internal/codexusage"
 	"github.com/skzv/ccmux/internal/gemini"
+	"github.com/skzv/ccmux/internal/makiusage"
 	"github.com/skzv/ccmux/internal/muse"
 )
 
@@ -74,7 +75,9 @@ type NamedSummary struct {
 // genericWalkAgents are the second-wave agents whose usage we read with
 // the format-agnostic JSONL walker (internal/agentusage) rather than a
 // bespoke parser. Claude / Codex have their own rich Walk* above;
-// Antigravity's transcripts are opaque protobuf (handled separately).
+// Antigravity's transcripts are opaque protobuf and Maki's usage lives
+// under a `token_usage` key the generic walker doesn't recognize (both
+// handled separately).
 var genericWalkAgents = []agent.ID{
 	agent.IDOpenCode, agent.IDKimi, agent.IDDroid, agent.IDCopilot,
 	agent.IDQoder, agent.IDKilo, agent.IDHermes, agent.IDAmp, agent.IDKiro,
@@ -98,6 +101,9 @@ func WalkOthers(window time.Duration) []NamedSummary {
 	}
 	if s := WalkMuse(home, window); s.HasData {
 		out = append(out, NamedSummary{Agent: "muse", Summary: s})
+	}
+	if s := WalkMaki(home, window); s.HasData {
+		out = append(out, NamedSummary{Agent: "maki", Summary: s})
 	}
 	for _, id := range genericWalkAgents {
 		root := agent.ByID(id).TranscriptsRoot(home)
@@ -229,6 +235,29 @@ func WalkAntigravity(window time.Duration) (AgentSummary, error) {
 		InputTokens:  0, // unknown — opaque protobuf
 		OutputTokens: 0,
 	}, nil
+}
+
+// WalkMaki aggregates per-window usage from ~/.local/state/maki/
+// sessions/ via the makiusage package. Maki's meta events carry a
+// cumulative token_usage the generic walker can't see, so it gets a
+// bespoke walker; the cross-agent AgentSummary drops its cache-token
+// and per-model cost breakdowns — fine for the compact dashboard row,
+// which shows total tokens only. Returns HasData=false when there are
+// no session files or nothing falls in the window (the dashboard
+// renders the install-hint placeholder).
+func WalkMaki(home string, window time.Duration) AgentSummary {
+	root := agent.ByID(agent.IDMaki).TranscriptsRoot(home)
+	s, err := makiusage.Walk(root, window)
+	if err != nil || !s.HasData {
+		return AgentSummary{Window: window}
+	}
+	return AgentSummary{
+		HasData:      true,
+		Window:       window,
+		Prompts:      s.Prompts,
+		InputTokens:  s.InputTokens,
+		OutputTokens: s.OutputTokens,
+	}
 }
 
 // WalkMuse uses completion events, never duplicate attribution samples.
