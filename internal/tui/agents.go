@@ -157,10 +157,11 @@ func (m agentsModel) Update(msg tea.Msg) (agentsModel, tea.Cmd) {
 		c, cmd := m.cursor.Update(msg)
 		m.cursor = c
 		return m, cmd
-	case agent.IDPi, agent.IDGrok, agent.IDMuse:
+	case agent.IDPi, agent.IDGrok, agent.IDMuse, agent.IDMaki:
 		// pi and grok are AGENTS.md-centric and manage their own
 		// config via their CLIs — no editable surface in ccmux yet,
-		// so the sub-tab is a placeholder.
+		// so the sub-tab is a placeholder. Same for maki: its config
+		// is init.lua + providers.toml, managed by the maki CLI.
 		return m, nil
 	}
 	return m, nil
@@ -281,6 +282,8 @@ func (m agentsModel) View(width, height int) string {
 		body = m.st.Muted.Render(tr("Muse settings and authentication are managed by the muse CLI. Run muse login to sign in."))
 	case agent.IDGrok:
 		body = m.st.Muted.Render(tr("Grok settings are managed by the grok CLI (~/.grok/config.toml + AGENTS.md)."))
+	case agent.IDMaki:
+		body = m.st.Muted.Render(tr("Maki settings are managed by the maki CLI (~/.config/maki/init.lua + providers.toml). Run maki auth login to sign in."))
 	}
 	inner := lipgloss.JoinVertical(lipgloss.Left, header, "", body)
 	// Never taller than the pane: overflowing content was clipped off the

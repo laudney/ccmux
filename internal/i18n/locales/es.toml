@@ -429,6 +429,7 @@
 "Connecting to" = "Conectando a"
 "Daemon + remote-host health also lives on the right" = "La salud del demonio + host remoto también se encuentra a la derecha"
 "Grok settings are managed by the grok CLI (~/.grok/config.toml + AGENTS.md)." = "La configuración de Grok es administrada por grok CLI (~/.grok/config.toml + AGENTS.md)."
+"Maki settings are managed by the maki CLI (~/.config/maki/init.lua + providers.toml). Run maki auth login to sign in." = "La configuración de Maki es administrada por maki CLI (~/.config/maki/init.lua + providers.toml). Ejecuta maki auth login para iniciar sesión."
 "Headless / SDK conversations: hidden" = "Conversaciones headless/SDK: ocultas"
 "Headless / SDK conversations: shown" = "Conversaciones headless/SDK: se muestran"
 "Host detail · " = "Detalle del anfitrión · "

@@ -436,6 +436,7 @@
 "Connecting to" = "正在连接"
 "Daemon + remote-host health also lives on the right" = "守护进程与远程主机状态也显示在右侧"
 "Grok settings are managed by the grok CLI (~/.grok/config.toml + AGENTS.md)." = "Grok 设置由 grok CLI 管理（~/.grok/config.toml + AGENTS.md）。"
+"Maki settings are managed by the maki CLI (~/.config/maki/init.lua + providers.toml). Run maki auth login to sign in." = "Maki 设置由 maki CLI 管理（~/.config/maki/init.lua + providers.toml）。运行 maki auth login 以登录。"
 "Headless / SDK conversations: hidden" = "无头 / SDK 对话：隐藏"
 "Headless / SDK conversations: shown" = "无头 / SDK 对话：显示"
 "Host detail · " = "主机详情 · "

@@ -429,6 +429,7 @@
 "Connecting to" = "に接続しています"
 "Daemon + remote-host health also lives on the right" = "デーモン + リモートホストの健全性は右側にも存在します"
 "Grok settings are managed by the grok CLI (~/.grok/config.toml + AGENTS.md)." = "Grok 設定は grok CLI (~/.grok/config.toml + AGENTS.md) によって管理されます。"
+"Maki settings are managed by the maki CLI (~/.config/maki/init.lua + providers.toml). Run maki auth login to sign in." = "Maki 設定は maki CLI (~/.config/maki/init.lua + providers.toml) によって管理されます。サインインには maki auth login を実行してください。"
 "Headless / SDK conversations: hidden" = "ヘッドレス/SDK 会話: 非表示"
 "Headless / SDK conversations: shown" = "ヘッドレス/SDK 会話: 表示"
 "Host detail · " = "ホストの詳細 · "
