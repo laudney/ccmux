@@ -117,9 +117,9 @@ Headless agent runs (`claude -p`, `codex exec`, SDK invocations) are filtered ou
 <img src="docs/vhs/out/cuj05_pick_agent.gif" alt="ccmux new-project form: cycle Claude / Codex / Antigravity / Cursor with arrow keys, the agent picker writes the per-project choice into .ccmux/agent." width="900" />
 </div>
 
-Pick per project which AI runs it — ccmux works with [Claude Code](https://claude.ai/code), [Codex](https://github.com/openai/codex), [Antigravity CLI](https://antigravity.google/download), [Gemini CLI](https://geminicli.com/), [Cursor](https://cursor.com/cli), [pi](https://pi.dev), [Grok](https://x.ai/cli), [Muse Code](https://ccmux.ai/docs/muse-code/), and more, speaking each one's launch and resume dialect. The choice is sticky, stored at `<project>/.ccmux/agent`. The dashboard, daemon state-detection, and dispatch all follow per-project. Press `a` in the Projects tab to switch the selected project's agent (cycles claude → codex → antigravity → cursor → pi → grok).
+Pick per project which AI runs it — ccmux works with [Claude Code](https://claude.ai/code), [Codex](https://github.com/openai/codex), [Antigravity CLI](https://antigravity.google/download), [Gemini CLI](https://geminicli.com/), [Cursor](https://cursor.com/cli), [pi](https://pi.dev), [Grok](https://x.ai/cli), [Muse Code](https://ccmux.ai/docs/muse-code/), [Maki](https://maki.sh), and more, speaking each one's launch and resume dialect. The choice is sticky, stored at `<project>/.ccmux/agent`. The dashboard, daemon state-detection, and dispatch all follow per-project. Press `a` in the Projects tab to switch the selected project's agent (cycles through every supported agent).
 
-Dashboard rows on non-default agents get a small `[codex]`, `[antigravity]`, `[cursor]`, `[pi]`, or `[grok]` tag so a single glance tells you what's running where.
+Dashboard rows on non-default agents get a small `[codex]`, `[antigravity]`, `[cursor]`, `[pi]`, `[grok]`, or `[maki]` tag so a single glance tells you what's running where.
 
 ---
 
@@ -330,9 +330,9 @@ Comment the file however you like. When ccmux saves it (a Settings row, `ccmux h
 ### 🤝 Multi-agent
 
 - Per-project agent stored in `<project>/.ccmux/agent` — sticky across sessions
-- New-project form cycles Claude / Codex / Antigravity / Cursor / pi / Grok with `←/→`
+- New-project form cycles through every supported agent with `←/→`
 - Press `a` in Projects to switch the selected project's agent
-- Dashboard rows on non-default agents get a small `[codex]`, `[antigravity]`, `[cursor]`, `[pi]`, or `[grok]` tag
+- Dashboard rows on non-default agents get a small `[codex]`, `[antigravity]`, `[cursor]`, `[pi]`, `[grok]`, or `[maki]` tag
 - Daemon state-detection (active / idle / needs_input) dispatches per agent for correct heuristics
 - `ccmux doctor` enumerates installed agents; setup wizard points at the right install command for each
 - Moshi push integration is currently Claude-only — Codex / Antigravity sessions get the audible terminal bell (still triggers a generic iOS push). Phase-2 work tracked in [`docs/01_Specs/02_Multi_Agent.md`](docs/01_Specs/02_Multi_Agent.md)

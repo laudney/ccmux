@@ -8,19 +8,21 @@ plan see [`docs/01_Specs/02_Multi_Agent.md`](../01_Specs/02_Multi_Agent.md).
 ## Where the abstraction lives
 
 ```
-internal/agent/                       ← strategy interface + 3 impls
+internal/agent/                       ← strategy interface + impls
 ├── agent.go        ← Agent interface, ID enum, State enum, registry
 ├── claude.go       ← Claude{}  (delegates to internal/claude)
-├── codex.go        ← Codex{}   (v1 idle-heuristic classifier stub)
-├── antigravity.go  ← Antigravity{}  (same)
-└── cursor.go       ← Cursor{}  (same)
+├── codex.go        ← Codex{}
+├── antigravity.go  ← Antigravity{}
+├── cursor.go       ← Cursor{}
+├── maki.go         ← Maki{}    (tontinton/maki; XDG config/state split)
+└── …               ← one file per agent, all with the same shape
 ```
 
 The package exports six things callers reach for:
 
 | Symbol | Purpose |
 |---|---|
-| `agent.ID` | Canonical id type. Values: `claude`, `codex`, `antigravity`, `cursor`, `gemini` (Gemini CLI is independent of Antigravity). Load-bearing — written verbatim into `.ccmux/agent`. |
+| `agent.ID` | Canonical id type. Values: `claude`, `codex`, `antigravity`, `cursor`, `pi`, `grok`, `gemini`, `muse`, the second wave (`opencode`, `kimi`, `droid`, `copilot`, `qoder`, `kilo`, `hermes`, `amp`, `kiro`, `maki`), and more as registered. Load-bearing — written verbatim into `.ccmux/agent`. |
 | `agent.Agent` | The strategy interface (ID, Binary, LaunchCmd, ConfigRoot, TranscriptsRoot, InitialPrompt, Classify). |
 | `agent.All()` | Canonical-order list of every shipped agent. Order matters: pickers default to first installed. |
 | `agent.ByID(id)` | Unchecked lookup. Empty string → claude (back-compat). Panics on unknown — callers route user input through ParseID first. |
@@ -128,7 +130,7 @@ boolean, and dashboard row ordering don't have to change.
   populated from `agent.AllInstalled()` (or `All()` if nothing is
   installed). Submit carries the chosen `agent.ID` through.
 - **Projects → `a` (switch):** on the selected local project, cycles
-  through agents in canonical order (claude → codex → antigravity → cursor → claude),
+  through agents in canonical order (… → maki → claude),
   writes the sidecar, toasts the result. Remote-project switching is
   currently a "not yet supported" toast — adding a daemon endpoint for
   in-place sidecar mutation on remotes is a Phase-4-remaining item.

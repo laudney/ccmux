@@ -16,7 +16,7 @@ These are locked. Open new specs if you want to revisit.
 
 1. **Agent identity is per-project, switchable.**
    Each project has a default agent stored in `<project>/.ccmux/agent`
-   (including `claude` / `codex` / `antigravity` / `gemini` / `cursor` / `pi` / `grok`).
+   (including `claude` / `codex` / `antigravity` / `gemini` / `cursor` / `pi` / `grok` / `muse` / `maki` and the rest of the second wave).
    `gemini` and `antigravity` identify separate CLIs, with separate native settings
    and transcript roots; they must never alias each other.
    Missing file → claude
@@ -45,7 +45,7 @@ The current Claude-specific code becomes an `Agent` strategy with
 three implementations. The single change point is `internal/agent`:
 
 ```go
-type ID string  // "claude", "codex", "antigravity", "cursor", "pi", "grok"
+type ID string  // "claude", "codex", "antigravity", "cursor", "pi", "grok", "maki", …
 
 type Agent interface {
     ID() ID
