@@ -3,6 +3,7 @@ package setupwizard
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -68,6 +69,42 @@ func TestDefaultAgentChoices_UsesConfiguredExecutable(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("defaultAgentChoices[%d] = %q, want %q (all choices: %v)", i, got[i], want[i], got)
 		}
+	}
+}
+
+func TestDefaultAgentChoices_AllInstalledAgents(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+	t.Setenv("SHELL", "/bin/false")
+	want := make([]agent.ID, 0, len(agent.All()))
+	for _, a := range agent.All() {
+		if err := os.WriteFile(filepath.Join(dir, a.Binary()), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, a.ID())
+	}
+	got := defaultAgentChoices(t.Context(), config.Config{})
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("default agent choices = %v, want %v", got, want)
+	}
+	opts := defaultAgentOptions(got, "claude")
+	for _, o := range opts {
+		if o.Value == "maki" {
+			if o.Key != "Maki" {
+				t.Fatalf("Maki option label = %q, want Maki", o.Key)
+			}
+			return
+		}
+	}
+	t.Fatal("Maki is missing from the default agent options")
+}
+
+func TestDefaultAgentChoices_ExcludesMissingAgents(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("SHELL", "/bin/false")
+	got := defaultAgentChoices(t.Context(), config.Config{})
+	if want := []agent.ID{agent.IDClaude}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("default agent choices = %v, want %v", got, want)
 	}
 }
 
