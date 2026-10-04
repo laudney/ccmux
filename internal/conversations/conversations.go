@@ -13,6 +13,8 @@
 //	Cursor:       ~/.cursor/projects/<encoded-cwd>/agent-transcripts/<uuid>/<uuid>.jsonl
 //	Antigravity:  ~/.gemini/antigravity-cli/conversations/<uuid>.pb
 //	Gemini:       ~/.gemini/tmp/<project>/chats/*.json / *.jsonl
+//	Maki:         ~/.local/state/maki/sessions/<id>.jsonl (archive/ subdir
+//	              holds user-deleted sessions and is skipped)
 //
 // Claude, Codex, and Cursor use JSONL. Known fragments for the same logical
 // conversation are merged in memory: Claude parent/subagent files by
@@ -27,6 +29,7 @@
 //	Codex:        codex resume <uuid>
 //	Cursor:       cursor-agent --resume <uuid>
 //	Antigravity:  agy --conversation <uuid>
+//	Maki:         maki --resume <id>
 //
 // All four accept the conversation by ID, so a user picking a row in
 // ccmux's UI gets handed straight to the right resume invocation
@@ -138,6 +141,8 @@ type Conversation struct {
 //   - Codex     → originator == "codex_exec", or a subagent rollout
 //     (guardian review, thread_spawn)
 //   - Antigravity → never (known transcript formats carry no signal)
+//   - Maki → never (same as Antigravity: maki transcripts carry no
+//     launch-mode marker — `maki -p` writes the same shape)
 //
 // Adding a new headless mode to an existing agent only needs an extra
 // case here — every TUI/CLI surface routes through this predicate.
@@ -234,6 +239,8 @@ func (c Conversation) ResumeArgsWithCommands(commands agent.Commands) []string {
 		return agent.ResumeArgs(agent.IDCursor, c.ID, commands)
 	case agent.IDPi:
 		return agent.ResumeArgs(agent.IDPi, c.ID, commands)
+	case agent.IDMaki:
+		return agent.ResumeArgs(agent.IDMaki, c.ID, commands)
 	}
 	// Unknown agent — empty argv; caller should treat as "can't
 	// resume" rather than spawn something bogus.
@@ -312,6 +319,14 @@ func RecentMessages(c Conversation, limit int) ([]Message, error) {
 	case agent.IDPi:
 		for _, path := range paths {
 			msgs, err := readPiMessages(path, limit)
+			if err != nil {
+				return nil, err
+			}
+			all = append(all, msgs...)
+		}
+	case agent.IDMaki:
+		for _, path := range paths {
+			msgs, err := readMakiMessages(path, limit)
 			if err != nil {
 				return nil, err
 			}
@@ -504,6 +519,14 @@ func CountMessages(c Conversation) (int, error) {
 	case agent.IDPi:
 		for _, path := range paths {
 			n, err := countPiMessages(path)
+			if err != nil {
+				return 0, err
+			}
+			total += n
+		}
+	case agent.IDMaki:
+		for _, path := range paths {
+			n, err := countMakiMessages(path)
 			if err != nil {
 				return 0, err
 			}
@@ -772,6 +795,8 @@ func guardTranscriptPath(home string, agentID agent.ID, path string) error {
 		allowed = []transcriptRoot{{root: filepath.Join(home, ".cursor", "projects"), ext: ".jsonl"}}
 	case agent.IDPi:
 		allowed = []transcriptRoot{{root: filepath.Join(home, ".pi", "agent", "sessions"), ext: ".jsonl"}}
+	case agent.IDMaki:
+		allowed = []transcriptRoot{{root: filepath.Join(home, ".local", "state", "maki", "sessions"), ext: ".jsonl"}}
 	case agent.IDAntigravity:
 		allowed = []transcriptRoot{
 			{root: filepath.Join(home, ".gemini", "antigravity-cli", "conversations"), ext: ".pb"},
@@ -871,6 +896,7 @@ func All(opts Options) ([]Conversation, error) {
 		ListGemini,
 		ListPi,
 		ListMuse,
+		ListMaki,
 	} {
 		got, err := fn(opts.HomeDir)
 		if err != nil {
@@ -1792,6 +1818,57 @@ func decodePiSessionDir(encoded string) string {
 		return ""
 	}
 	return "/" + strings.ReplaceAll(strings.TrimPrefix(encoded, "-"), "-", "/")
+}
+
+// readMakiMessages parses a maki session file into the shared Message
+// shape for the transcript-preview overlay. Mirrors readPiMessages but
+// against maki's flat {"t":"msg","d":{…}} schema. maki msg events
+// carry no per-event timestamp, so Message.Timestamp stays zero.
+func readMakiMessages(path string, limit int) ([]Message, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+	sc := jsonl.NewScanner(f, 4*1024*1024)
+	var all []Message
+	for sc.Scan() {
+		var ev makiEvent
+		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
+			continue
+		}
+		role, body, ok := makiVisibleBody(ev)
+		if !ok {
+			continue
+		}
+		all = append(all, Message{Role: role, Content: body})
+	}
+	if len(all) > limit {
+		all = all[len(all)-limit:]
+	}
+	return all, nil
+}
+
+// countMakiMessages counts the user + assistant turns readMakiMessages
+// would list.
+func countMakiMessages(path string) (int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+	sc := jsonl.NewScanner(f, 4*1024*1024)
+	n := 0
+	for sc.Scan() {
+		var ev makiEvent
+		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
+			continue
+		}
+		if _, _, ok := makiVisibleBody(ev); ok {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // readPiMessages parses a pi session file into the shared Message
