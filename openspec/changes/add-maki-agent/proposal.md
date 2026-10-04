@@ -35,9 +35,13 @@ have no path today.
   maki's `token_usage` block inside `meta` events.
 - Give Maki an accent color (Pink) for the dashboard/conversations
   color coding, an install hint (`curl -fsSL https://maki.sh/install.sh
-  | sh`) in the doctor and setup wizard, and a placeholder Agents
-  sub-tab (config is `~/.config/maki/init.lua` + `providers.toml`,
-  managed by the maki CLI).
+  | sh`) in the doctor and setup wizard, and an Agents sub-tab that
+  previews `init.lua`, `providers.toml`, `permissions.toml`, and
+  `mcp.toml` in the native config directory and opens the selected
+  file in the user's editor. Maki owns the file formats and authentication.
+- Use the shared agent registry for default-agent selectors and MCP
+  launch descriptions. Include detected agent directories in generated
+  daemon service PATH so PATH-only installations remain launchable.
 - Provider and model selection remain in Maki. The generic OpenRouter
   wrapper only redirects the OpenAI platform provider; it does not
   change Maki's selected provider. Maki also has a native OpenRouter

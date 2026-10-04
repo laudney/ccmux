@@ -105,9 +105,9 @@ The new-project form also picks the agent (Claude, Codex, Cursor, and more) for 
 <img src="docs/vhs/out/cuj04_resume.gif" alt="ccmux Conversations screen showing past Claude / Codex / Antigravity threads sorted by recency. Selecting one and pressing Enter resumes the agent with the correct session ID." width="900" />
 </div>
 
-ccmux remembers every past Claude / Codex / Antigravity thread, sorted by recency. Press `2` for the Conversations screen, navigate, press `Enter`. The daemon resumes the agent with the correct session ID. You don't type `claude --resume <hash>` ever again.
+ccmux lists past conversations from supported agents, including Maki, sorted by recency. Press `3` for the Conversations screen, navigate, press `Enter`. The daemon resumes the agent with the correct session ID.
 
-Headless agent runs (`claude -p`, `codex exec`, SDK invocations) are filtered out by default so a scripted workflow doesn't drown the list — press `H` to toggle them back on.
+Known headless agent runs (`claude -p`, `codex exec`, SDK invocations) are filtered out by default so a scripted workflow doesn't drown the list — press `H` to toggle them back on. Maki does not persist a headless marker, so its print-mode sessions cannot be filtered reliably.
 
 ---
 
@@ -186,7 +186,9 @@ Notes follow you across devices: press `H` to toggle which machine you're viewin
 <img src="docs/vhs/out/cuj09_agents.gif" alt="ccmux Agents screen showing Claude, Codex, and Antigravity with install status, sign-in status, and per-agent config root path." width="900" />
 </div>
 
-One screen for "is my agent installed and signed in?" Per-agent CLI version, config root, login status, and a command palette to re-run setup or open the config directory.
+Open **[5] Agents** to use each agent's config view or CLI guidance. `ccmux doctor` checks which agent tools are installed.
+
+For Maki, open **[5] Agents → Maki** with `tab` or `h`/`l`. Select a native config file (`init.lua`, `providers.toml`, `permissions.toml`, or `mcp.toml`) with `j`/`k` and press `e` to edit it. The preview reloads when the editor returns. Use `maki auth login` to sign in.
 
 ---
 

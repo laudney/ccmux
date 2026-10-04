@@ -60,6 +60,15 @@
    observations, context updates and slash-command-only turns.
 6. **Accent: Pink** — the only design-token accent not yet assigned to
    an agent.
+7. **Native config editor** — reuse the Agents file browser and shared
+   editor process. Show Maki's four native config files without parsing or
+   rewriting Lua/TOML. Viewing the pane does not create files; editing a
+   missing file creates its directory before the editor runs. Re-read the
+   preview after the editor returns and when entering the Maki sub-tab.
+8. **Registry-based selection and service discovery** — default selectors
+   and MCP launch descriptions enumerate `agent.All()`. Generated service
+   PATH retains directories with detected agent binaries in caller PATH
+   order, after configured command directories and before system defaults.
 
 ### Compatibility evidence
 

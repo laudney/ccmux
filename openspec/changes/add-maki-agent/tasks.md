@@ -41,8 +41,13 @@
 - [x] 5.1 Install hints: `cmd/ccmux/cmd` `agentInstallHint` and
   `internal/setupwizard` `installHintFor` (`curl -fsSL
   https://maki.sh/install.sh | sh`). Doctor/wizard iterate `All()`.
-- [x] 5.2 TUI: Agents sub-tab placeholder body, Conversations section
+- [x] 5.2 TUI: Agents sub-tab with native config previews and editor,
+  Conversations section
   nav + roots legend, Pink accent in `styles.AgentAccent`.
+- [x] 5.3 Default-agent selectors in setup and Settings use the registry;
+  MCP launch descriptions include all registered agent IDs.
+- [x] 5.4 Generated daemon service PATH includes detected agent directories,
+  including Maki installations in `~/.cargo/bin`.
 
 ## 6. Docs
 

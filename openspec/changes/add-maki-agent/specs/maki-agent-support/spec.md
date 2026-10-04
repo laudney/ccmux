@@ -131,6 +131,28 @@ deltas, rather than attributing their full historical totals to the window.
 
 ccmux SHALL surface maki everywhere the supported-agent set is shown.
 
+#### Scenario: Default-agent selection
+
+- **WHEN** setup lists installed default agents or Settings cycles agent IDs
+- **THEN** Maki is an available choice when installed in setup, and a
+  supported choice in Settings
+- **AND** MCP launch descriptions include its canonical ID
+
+#### Scenario: Native configuration editing
+
+- **WHEN** the user switches to Agents → Maki
+- **THEN** the pane lists and previews `init.lua`, `providers.toml`,
+  `permissions.toml`, and `mcp.toml` from the native config root
+- **AND** pressing `e` opens the selected file in the user's editor
+- **AND** the preview reloads after a successful edit
+- **AND** viewing missing files does not create them
+
+#### Scenario: PATH-only service launches
+
+- **GIVEN** Maki is installed in a directory on the caller's PATH
+- **WHEN** ccmux generates a daemon service PATH
+- **THEN** that directory is retained so the daemon can launch Maki
+
 #### Scenario: Install guidance
 
 - **WHEN** `ccmux doctor` runs or the setup wizard lists agents and
