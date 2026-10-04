@@ -13,8 +13,7 @@
 //	Cursor:       ~/.cursor/projects/<encoded-cwd>/agent-transcripts/<uuid>/<uuid>.jsonl
 //	Antigravity:  ~/.gemini/antigravity-cli/conversations/<uuid>.pb
 //	Gemini:       ~/.gemini/tmp/<project>/chats/*.json / *.jsonl
-//	Maki:         ~/.local/state/maki/sessions/<id>.jsonl (archive/ subdir
-//	              holds user-deleted sessions and is skipped)
+//	Maki:         native sessions/<id>.jsonl or legacy .json; archive/ skipped
 //
 // Claude, Codex, and Cursor use JSONL. Known fragments for the same logical
 // conversation are merged in memory: Claude parent/subagent files by
@@ -796,7 +795,8 @@ func guardTranscriptPath(home string, agentID agent.ID, path string) error {
 	case agent.IDPi:
 		allowed = []transcriptRoot{{root: filepath.Join(home, ".pi", "agent", "sessions"), ext: ".jsonl"}}
 	case agent.IDMaki:
-		allowed = []transcriptRoot{{root: filepath.Join(home, ".local", "state", "maki", "sessions"), ext: ".jsonl"}}
+		root := agent.ByID(agent.IDMaki).TranscriptsRoot(home)
+		allowed = []transcriptRoot{{root: root, ext: ".jsonl"}, {root: root, ext: ".json"}}
 	case agent.IDAntigravity:
 		allowed = []transcriptRoot{
 			{root: filepath.Join(home, ".gemini", "antigravity-cli", "conversations"), ext: ".pb"},
@@ -1818,57 +1818,6 @@ func decodePiSessionDir(encoded string) string {
 		return ""
 	}
 	return "/" + strings.ReplaceAll(strings.TrimPrefix(encoded, "-"), "-", "/")
-}
-
-// readMakiMessages parses a maki session file into the shared Message
-// shape for the transcript-preview overlay. Mirrors readPiMessages but
-// against maki's flat {"t":"msg","d":{…}} schema. maki msg events
-// carry no per-event timestamp, so Message.Timestamp stays zero.
-func readMakiMessages(path string, limit int) ([]Message, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
-	}
-	defer f.Close()
-	sc := jsonl.NewScanner(f, 4*1024*1024)
-	var all []Message
-	for sc.Scan() {
-		var ev makiEvent
-		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
-			continue
-		}
-		role, body, ok := makiVisibleBody(ev)
-		if !ok {
-			continue
-		}
-		all = append(all, Message{Role: role, Content: body})
-	}
-	if len(all) > limit {
-		all = all[len(all)-limit:]
-	}
-	return all, nil
-}
-
-// countMakiMessages counts the user + assistant turns readMakiMessages
-// would list.
-func countMakiMessages(path string) (int, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0, fmt.Errorf("open %s: %w", path, err)
-	}
-	defer f.Close()
-	sc := jsonl.NewScanner(f, 4*1024*1024)
-	n := 0
-	for sc.Scan() {
-		var ev makiEvent
-		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
-			continue
-		}
-		if _, _, ok := makiVisibleBody(ev); ok {
-			n++
-		}
-	}
-	return n, nil
 }
 
 // readPiMessages parses a pi session file into the shared Message

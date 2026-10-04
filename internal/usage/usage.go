@@ -237,14 +237,9 @@ func WalkAntigravity(window time.Duration) (AgentSummary, error) {
 	}, nil
 }
 
-// WalkMaki aggregates per-window usage from ~/.local/state/maki/
-// sessions/ via the makiusage package. Maki's meta events carry a
-// cumulative token_usage the generic walker can't see, so it gets a
-// bespoke walker; the cross-agent AgentSummary drops its cache-token
-// and per-model cost breakdowns — fine for the compact dashboard row,
-// which shows total tokens only. Returns HasData=false when there are
-// no session files or nothing falls in the window (the dashboard
-// renders the install-hint placeholder).
+// WalkMaki reports input/output deltas between native usage snapshots.
+// An old compacted session without a baseline cannot be placed in the
+// window; its first surviving snapshot only seeds subsequent deltas.
 func WalkMaki(home string, window time.Duration) AgentSummary {
 	root := agent.ByID(agent.IDMaki).TranscriptsRoot(home)
 	s, err := makiusage.Walk(root, window)

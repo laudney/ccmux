@@ -13,22 +13,11 @@ import (
 	"github.com/skzv/ccmux/internal/termsafe"
 )
 
-// ListMaki walks ~/.local/state/maki/sessions/<id>.jsonl (maki is the
-// Rust terminal coding agent, tontinton/maki). The sessions directory
-// is flat — one file per conversation — and holds an `archive/`
-// SUBDIRECTORY of user-deleted sessions; deleted conversations must
-// not resurface, so we read only the top level and never descend.
-//
-// The conversation ID comes from the header line's `id` (falling back
-// to the filename stem), and the project label is the header `cwd` —
-// the same convention as pi's session header (see ListPi).
-//
-// Launch mode: maki transcripts carry NO headless marker (SessionMeta
-// only has mode build/plan, and `maki -p` headless writes the same
-// shape), so Entrypoint stays "" and IsHeadless reports false for
-// every maki row — the Antigravity precedent.
+// ListMaki reads the native flat session store. archive/ contains old
+// snapshots, not additional conversations. JSONL takes precedence over
+// legacy JSON, as it does in Maki's loader.
 func ListMaki(home string) ([]Conversation, error) {
-	root := filepath.Join(home, ".local", "state", "maki", "sessions")
+	root := agent.ByID(agent.IDMaki).TranscriptsRoot(home)
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -36,15 +25,22 @@ func ListMaki(home string) ([]Conversation, error) {
 		}
 		return nil, fmt.Errorf("read %s: %w", root, err)
 	}
+	names := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			names[e.Name()] = true
+		}
+	}
 	var out []Conversation
 	for _, e := range entries {
-		// e.IsDir() skips archive/ (deleted sessions) and anything
-		// else maki parks in this directory; we only read flat files.
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+		ext := filepath.Ext(e.Name())
+		if e.IsDir() || (ext != ".jsonl" && ext != ".json") {
 			continue
 		}
-		path := filepath.Join(root, e.Name())
-		c := readMakiTranscript(path)
+		if ext == ".json" && names[strings.TrimSuffix(e.Name(), ext)+".jsonl"] {
+			continue
+		}
+		c := readMakiTranscript(filepath.Join(root, e.Name()))
 		if c.ID != "" {
 			out = append(out, c)
 		}
@@ -52,11 +48,6 @@ func ListMaki(home string) ([]Conversation, error) {
 	return out, nil
 }
 
-// makiEvent models one line of a maki session file. maki tags every
-// line with a top-level `t` ("header" once per file, "msg" for turns,
-// "meta" for session metadata, plus "out"/"frame" shapes we ignore).
-// The header carries `id` + `cwd`; the meta events carry `updated_at`
-// (epoch seconds) and the LAST one is authoritative.
 type makiEvent struct {
 	Type      string       `json:"t"`
 	ID        string       `json:"id"`
@@ -68,21 +59,22 @@ type makiEvent struct {
 type makiMessage struct {
 	Role        string          `json:"role"`
 	Content     json.RawMessage `json:"content"`
-	DisplayText string          `json:"display_text"`
+	DisplayText *string         `json:"display_text"`
+	Kind        json.RawMessage `json:"kind"`
 }
 
-// content returns the human-readable text of a maki message. Content
-// is an array of typed blocks (text blocks carry "text");
-// messagePartsContent already handles that shape (and a bare string,
-// for older sessions), so we delegate.
+// content follows Maki's display_text contract: an empty override hides
+// synthetic API messages, and a non-empty one replaces their API text.
 func (m *makiMessage) content() string {
-	if m == nil || len(m.Content) == 0 {
+	if m == nil || string(m.Kind) == `"observation"` {
 		return ""
+	}
+	if m.DisplayText != nil {
+		return *m.DisplayText
 	}
 	return messagePartsContent(m.Content)
 }
 
-// makiVisibleBody is visibleTurn for a maki msg event.
 func makiVisibleBody(ev makiEvent) (role, body string, ok bool) {
 	if ev.Type != "msg" || ev.Data == nil {
 		return "", "", false
@@ -92,66 +84,79 @@ func makiVisibleBody(ev makiEvent) (role, body string, ok bool) {
 	return role, body, ok
 }
 
-// readMakiTranscript reads one maki session file end-to-end, returning
-// a Conversation with ID, Project, Preview, and LastActivity populated.
+type makiLegacySession struct {
+	Version   int           `json:"version"`
+	ID        string        `json:"id"`
+	CWD       string        `json:"cwd"`
+	UpdatedAt int64         `json:"updated_at"`
+	Messages  []makiMessage `json:"messages"`
+}
+
+// scanMaki visits records without retaining tool outputs or all messages.
+func scanMaki(path string, visit func(makiEvent)) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+	if filepath.Ext(path) == ".json" {
+		var s makiLegacySession
+		if err := json.NewDecoder(f).Decode(&s); err != nil {
+			return fmt.Errorf("read %s: %w", path, err)
+		}
+		if s.Version != 1 || s.ID == "" {
+			return fmt.Errorf("invalid Maki session %s", path)
+		}
+		visit(makiEvent{Type: "header", ID: s.ID, CWD: s.CWD})
+		for i := range s.Messages {
+			visit(makiEvent{Type: "msg", Data: &s.Messages[i]})
+		}
+		visit(makiEvent{Type: "meta", UpdatedAt: s.UpdatedAt})
+		return nil
+	}
+	sc := jsonl.NewScanner(f, 4*1024*1024)
+	for sc.Scan() {
+		var ev makiEvent
+		if json.Unmarshal(sc.Bytes(), &ev) == nil {
+			visit(ev)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	return nil
+}
+
 func readMakiTranscript(path string) Conversation {
 	c := Conversation{Agent: agent.IDMaki, Path: path}
 	if info, err := os.Stat(path); err == nil {
 		c.LastActivity = info.ModTime()
 	}
-	// Fallback ID from the filename: <id>.jsonl → id.
-	c.ID = strings.TrimSuffix(filepath.Base(path), ".jsonl")
-
-	f, err := os.Open(path)
-	if err != nil {
-		return c
-	}
-	defer f.Close()
-	var latestEvent time.Time
-	sc := jsonl.NewScanner(f, 4*1024*1024)
-	for sc.Scan() {
-		var ev makiEvent
-		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
-			continue
-		}
+	err := scanMaki(path, func(ev makiEvent) {
 		switch ev.Type {
 		case "header":
-			// Header line: authoritative id + cwd.
-			if ev.ID != "" {
-				c.ID = ev.ID
-			}
-			if ev.CWD != "" {
-				c.Project = ev.CWD
-			}
+			c.ID, c.Project = ev.ID, ev.CWD
 		case "msg":
 			if ev.Data != nil && ev.Data.Role == "user" && c.Preview == "" {
 				c.Preview = makiPreviewText(ev.Data)
 			}
 		case "meta":
-			// One or many meta events per file; the LAST one has the
-			// final updated_at, but any later one wins here since
-			// they are written in order.
 			if ev.UpdatedAt > 0 {
-				if ts := time.Unix(ev.UpdatedAt, 0).UTC(); ts.After(latestEvent) {
-					latestEvent = ts
-				}
+				c.LastActivity = time.Unix(ev.UpdatedAt, 0).UTC()
 			}
 		}
-	}
-	if !latestEvent.IsZero() {
-		c.LastActivity = latestEvent
+	})
+	if err != nil {
+		return Conversation{}
 	}
 	return c
 }
 
-// makiPreviewText picks the text a maki user message shows as the
-// conversation preview, and "" for turns that shouldn't: the
-// "[Cancelled by user]" interrupt marker (some of which also carry an
-// empty display_text), and messages that are only a slash command
-// like "/resume" — those are control input, not a prompt. Everything
-// else is trimmed and flattened to one line, truncated to ~100 runes,
-// like the other agents' preview rules.
 func makiPreviewText(m *makiMessage) string {
+	// Host observations and context updates are not user prompts.
+	if len(m.Kind) != 0 && string(m.Kind) != `"turn"` {
+		return ""
+	}
 	text := strings.Join(strings.Fields(termsafe.String(m.content())), " ")
 	if text == "" || text == "[Cancelled by user]" {
 		return ""
@@ -164,4 +169,30 @@ func makiPreviewText(m *makiMessage) string {
 		return string(runes[:100]) + "…"
 	}
 	return text
+}
+
+func readMakiMessages(path string, limit int) ([]Message, error) {
+	var all []Message
+	err := scanMaki(path, func(ev makiEvent) {
+		if role, body, ok := makiVisibleBody(ev); ok {
+			all = append(all, Message{Role: role, Content: body})
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(all) > limit {
+		all = all[len(all)-limit:]
+	}
+	return all, nil
+}
+
+func countMakiMessages(path string) (int, error) {
+	n := 0
+	err := scanMaki(path, func(ev makiEvent) {
+		if _, _, ok := makiVisibleBody(ev); ok {
+			n++
+		}
+	})
+	return n, err
 }

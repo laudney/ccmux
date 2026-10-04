@@ -47,6 +47,8 @@ func TestAll_EveryAgentIsComplete(t *testing.T) {
 	// XDG overrides, including the ones GitHub runners export.
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("XDG_DATA_HOME", "")
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("APPDATA", "")
 	home := "/home/tester"
 	for _, a := range All() {
 		id := a.ID()

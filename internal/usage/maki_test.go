@@ -3,8 +3,11 @@ package usage
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/skzv/ccmux/internal/agent"
 )
 
 // writeMakiSession writes one maki session .jsonl under
@@ -12,11 +15,11 @@ import (
 // cumulative meta token_usage.
 func writeMakiSession(t *testing.T, home, name string, updatedAt, in, out int64) {
 	t.Helper()
-	path := filepath.Join(home, ".local", "state", "maki", "sessions", name+".jsonl")
+	path := filepath.Join((agent.Maki{}).TranscriptsRoot(home), name+".jsonl")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	lines := `{"t":"header","v":2,"id":"C1","model":"prov/model","cwd":"/p","created_at":100}` + "\n" +
+	lines := `{"t":"header","v":2,"id":"C1","model":"prov/model","cwd":"/p","created_at":` + itoa(updatedAt-100) + `}` + "\n" +
 		`{"t":"msg","d":{"role":"user","content":[{"type":"text","text":"hello"}]}}` + "\n" +
 		`{"t":"meta","token_usage":{"input_tokens":` + itoa(in) + `,"output_tokens":` + itoa(out) + `},"updated_at":` + itoa(updatedAt) + "}"
 	if err := os.WriteFile(path, []byte(lines), 0o644); err != nil {
@@ -24,17 +27,7 @@ func writeMakiSession(t *testing.T, home, name string, updatedAt, in, out int64)
 	}
 }
 
-func itoa(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
-}
+func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 
 // TestWalkOthers_IncludesMakiRow — a maki transcript in the fake home
 // must surface as a "maki" row in WalkOthers. Maki is deliberately not
@@ -43,6 +36,9 @@ func itoa(n int64) string {
 func TestWalkOthers_IncludesMakiRow(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("APPDATA", "")
 	writeMakiSession(t, home, "C1", time.Now().Add(-time.Hour).Unix(), 100, 50)
 
 	rows := WalkOthers(5 * time.Hour)
@@ -68,6 +64,9 @@ func TestWalkOthers_IncludesMakiRow(t *testing.T) {
 func TestWalkOthers_MakiStaleSessionOmitted(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("APPDATA", "")
 	writeMakiSession(t, home, "C1", time.Now().Add(-24*time.Hour).Unix(), 100, 50)
 
 	for _, r := range WalkOthers(5 * time.Hour) {

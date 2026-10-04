@@ -107,6 +107,69 @@ func TestWalk(t *testing.T) {
 			want: Summary{HasData: true, Window: window, InputTokens: 3, OutputTokens: 2},
 		},
 		{
+			name: "old tokens and prompts are not counted after resume",
+			files: map[string][]string{"C1.jsonl": {
+				header, userMsg,
+				`{"t":"meta","token_usage":{"input_tokens":1000,"output_tokens":500},"updated_at":` + itoa(stale) + `}`,
+				userMsg,
+				`{"t":"meta","token_usage":{"input_tokens":1100,"output_tokens":520},"updated_at":` + itoa(inWindow) + `}`,
+				`{"t":"meta","token_usage":{"input_tokens":1100,"output_tokens":520},"updated_at":` + itoa(inWindow+1) + `}`,
+			}},
+			want: Summary{HasData: true, Window: window, Prompts: 1, InputTokens: 100, OutputTokens: 20},
+		},
+		{
+			name: "hidden and host messages are not prompts",
+			files: map[string][]string{"C1.jsonl": {
+				header,
+				`{"t":"msg","d":{"role":"user","content":[{"type":"text","text":"compaction"}],"display_text":""}}`,
+				`{"t":"msg","d":{"role":"user","content":[{"type":"text","text":"observation"}],"kind":"observation"}}`,
+				`{"t":"msg","d":{"role":"user","content":[{"type":"text","text":"updated facts"}],"kind":{"context_update":{}},"display_text":"Model changed"}}`,
+				`{"t":"msg","d":{"role":"user","content":[{"type":"text","text":"/resume"}]}}`,
+				`{"t":"msg","d":{"role":"user","content":[{"type":"text","text":"expanded prompt"}],"display_text":"Fix the bug"}}`,
+				`{"t":"meta","token_usage":{"input_tokens":100,"output_tokens":50},"updated_at":` + itoa(inWindow) + `}`,
+			}},
+			want: Summary{HasData: true, Window: window, Prompts: 1, InputTokens: 100, OutputTokens: 50},
+		},
+		{
+			name:  "nested snapshots never count",
+			files: map[string][]string{"locks/C1.jsonl": {header, userMsg, `{"t":"meta","token_usage":{"input_tokens":999},"updated_at":` + itoa(inWindow) + `}`}},
+			want:  Summary{Window: window},
+		},
+		{
+			name: "old compacted snapshot is only a baseline",
+			files: map[string][]string{"C1.jsonl": {
+				`{"t":"header","id":"C1","created_at":` + itoa(stale) + `}`, userMsg,
+				`{"t":"meta","token_usage":{"input_tokens":1000,"output_tokens":500},"updated_at":` + itoa(inWindow) + `}`,
+				userMsg,
+				`{"t":"meta","token_usage":{"input_tokens":1100,"output_tokens":520},"updated_at":` + itoa(inWindow+1) + `}`,
+			}},
+			want: Summary{HasData: true, Window: window, Prompts: 1, InputTokens: 100, OutputTokens: 20},
+		},
+		{
+			name: "counter decreases do not subtract other usage",
+			files: map[string][]string{"C1.jsonl": {
+				header, userMsg,
+				`{"t":"meta","token_usage":{"input_tokens":100,"output_tokens":50},"updated_at":` + itoa(inWindow) + `}`,
+				`{"t":"meta","token_usage":{"input_tokens":0,"output_tokens":0},"updated_at":` + itoa(inWindow+1) + `}`,
+				`{"t":"meta","token_usage":{"input_tokens":10,"output_tokens":5},"updated_at":` + itoa(inWindow+2) + `}`,
+			}},
+			want: Summary{HasData: true, Window: window, Prompts: 1, InputTokens: 110, OutputTokens: 55},
+		},
+		{
+			name:  "legacy JSON is counted once",
+			files: map[string][]string{"C1.json": {`{"version":1,"id":"C1","created_at":` + itoa(inWindow-100) + `,"updated_at":` + itoa(inWindow) + `,"token_usage":{"input_tokens":10,"output_tokens":5},"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`}},
+			want:  Summary{HasData: true, Window: window, Prompts: 1, InputTokens: 10, OutputTokens: 5},
+		},
+		{
+			name: "JSONL supersedes legacy JSON",
+			files: map[string][]string{
+				"C1.json":  {`{"version":1,"id":"C1","created_at":` + itoa(inWindow-100) + `,"updated_at":` + itoa(inWindow) + `,"token_usage":{"input_tokens":999}}`},
+				"C1.jsonl": {header, userMsg, `{"t":"meta","token_usage":{"input_tokens":10,"output_tokens":5},"updated_at":` + itoa(inWindow) + `}`},
+			},
+			want: Summary{HasData: true, Window: window, Prompts: 1, InputTokens: 10, OutputTokens: 5},
+		},
+
+		{
 			name: "multiple sessions aggregate",
 			files: map[string][]string{
 				"C1.jsonl": {

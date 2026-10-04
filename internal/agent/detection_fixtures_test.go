@@ -134,6 +134,13 @@ func TestDetectionFixtures(t *testing.T) {
 		{"opencode_networking_idle.txt", IDKilo, "", true, StateNeedsInput},
 		{"opencode_networking_working.txt", IDOpenCode, "", true, StateActive},
 		{"opencode_networking_working.txt", IDKilo, "", true, StateActive},
+
+		{"maki_idle.txt", IDMaki, titleSidecar, true, StateNeedsInput},
+		{"maki_idle.txt", IDMaki, titleSidecar, false, StateActive},
+		{"maki_working.txt", IDMaki, titleSidecar, true, StateActive},
+		{"maki_working.txt", IDMaki, titleSidecar, false, StateActive},
+		{"maki_permission.txt", IDMaki, titleSidecar, true, StateNeedsInput},
+		{"maki_permission.txt", IDMaki, titleSidecar, false, StateNeedsInput},
 	}
 	for _, tc := range cases {
 		lastChange, when := fresh, "fresh"

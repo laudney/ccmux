@@ -13,19 +13,20 @@ id = "body_status_spinner_working"
 state = "working"
 priority = 800
 region = "bottom_non_empty_lines(1)"
-regex = ['[\x{2800}-\x{28FF}]']
+line_regex = ['^\s*[\x{2800}-\x{28FF}]\s+\[(?:BUILD|PLAN)\]']
 
-# Permission dialog: the overlay titled " Permission Required " with the
-# y Allow / n Deny option rows. The dialog outlives the process (tmux
-# keeps the last frame), so it is idle-gated like the other agents'
-# approval rules: a maki that died with the dialog up is not asking.
+# The status spinner still animates during an approval, so explicit dialogs
+# cannot require an idle pane. The daemon checks whether the process is alive.
 [[rules]]
 id = "body_permission_dialog"
 state = "blocked"
 priority = 900
-region = "bottom_non_empty_lines(14)"
-all = [
-  { contains = ["Permission Required"] },
-  { contains = ["Deny"] },
-]
-require_idle = true
+region = "bottom_non_empty_lines(40)"
+line_regex = ['^\s*╭ Permission Required ─+╮\s*$']
+
+[[rules]]
+id = "body_question_dialog"
+state = "blocked"
+priority = 900
+region = "bottom_non_empty_lines(3)"
+line_regex = ['^.*Enter\s+(?:submit|toggle).*Esc\s+dismiss.*$']

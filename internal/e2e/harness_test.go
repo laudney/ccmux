@@ -117,9 +117,9 @@ func installStubAgents() error {
 		return err
 	}
 	stubBinDir = dir
-	for _, name := range []string{"claude", "codex", "agy", "cursor-agent", "pi", "gemini"} {
+	for _, name := range []string{"claude", "codex", "agy", "cursor-agent", "pi", "gemini", "maki"} {
 		extra := ""
-		if name == "gemini" {
+		if name == "gemini" || name == "maki" {
 			extra = "echo \"ccmux-stub-args=$*\"\necho \"ccmux-stub-cwd=$PWD\"\n"
 		}
 		script := fmt.Sprintf(stubAgentScript, extra, stubAgentMaxSeconds)
