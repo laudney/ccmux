@@ -59,10 +59,9 @@ heuristic when no rule matches.
 
 - **GIVEN** the pane shows the " Permission Required " overlay with
   Allow/Deny options
-- **WHEN** the pane has been quiet for the idle threshold
-- **THEN** the session classifies as needing input
-- **AND** the classification is idle-gated, so a dialog frozen on a
-  dead pane does not ring
+- **THEN** the session classifies as needing input even when its
+  status spinner keeps moving
+- **AND** the daemon retains its process-liveness guard
 
 #### Scenario: Maki sets no OSC title
 
@@ -73,7 +72,9 @@ heuristic when no rule matches.
 ### Requirement: Maki Conversation Listing
 
 ccmux SHALL enumerate past maki sessions from
-`~/.local/state/maki/sessions` for the Conversations screen and the
+the native session directory (default `~/.local/state/maki/sessions`,
+legacy `~/.maki/sessions`, or the configured XDG/Windows directory)
+for the Conversations screen and the
 `ccmux list-conversations` CLI.
 
 #### Scenario: Sessions are listed with previews
@@ -89,7 +90,7 @@ ccmux SHALL enumerate past maki sessions from
 
 - **GIVEN** a session file exists under the `archive/` subdirectory
 - **WHEN** conversations are enumerated
-- **THEN** it does not appear (the user deleted it)
+- **THEN** it does not appear as another conversation
 
 #### Scenario: Maki conversations resume by ID
 
@@ -111,7 +112,9 @@ headless.
 ### Requirement: Maki Usage Aggregation
 
 ccmux SHALL report maki token usage on the dashboard by walking
-maki session transcripts for their cumulative `token_usage` totals.
+maki session transcripts for deltas between cumulative `token_usage`
+snapshots. Old compacted snapshots without a baseline SHALL seed later
+deltas, rather than attributing their full historical totals to the window.
 
 #### Scenario: Usage appears for agents with data
 

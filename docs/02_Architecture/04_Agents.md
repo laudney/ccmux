@@ -237,3 +237,24 @@ The shape is intentionally additive. To add, say, `qwen`:
 The protocol, sidecar shape, picker UI, doctor flow, and dashboard
 badge all pick it up automatically — there is no other place to
 register the new agent.
+
+### Maki compatibility
+
+Maki uses the same public CLI and transcript format in upstream
+`tontinton/maki` and the maintained fork. ccmux launches `maki`, continues
+with `maki --continue`, and resumes a conversation with `maki --resume <id>`.
+No fork plugin is required. Provider and model selection remain in Maki.
+
+Config and state use `~/.maki` when that directory exists. Otherwise,
+Unix uses the XDG roots (`~/.config/maki` and `~/.local/state/maki` by
+default); Windows uses AppData/Roaming. Conversations read top-level
+JSONL and legacy JSON sessions. JSONL takes precedence, and `archive/`
+snapshots do not appear as separate conversations. Hidden synthetic
+messages and host observations are excluded from previews.
+
+The usage row counts deltas between cumulative snapshots. If compaction
+removed the baseline for an old session, the first surviving snapshot
+only seeds later deltas; its historical totals have no reliable window.
+Maki transcripts also lack a print-mode marker, so ccmux cannot distinguish
+interactive and headless runs. Fork-only named runtime profiles are outside
+this integration.

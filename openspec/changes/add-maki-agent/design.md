@@ -8,7 +8,9 @@
 - Config root: `~/.config/maki` (`init.lua`, `providers.toml`,
   `permissions.toml`, `mcp.toml`). Session data: `~/.local/state/maki/`
   (`sessions/<id>.jsonl`, `projects/<slug>-<hash>/`, `auth/`). Cache:
-  `~/.cache/maki`. Strict XDG split, like OpenCode/Kilo.
+  `~/.cache/maki`. XDG overrides are honored on Unix. If `~/.maki` exists,
+  upstream and the fork both use it for config and state. Windows
+  uses AppData/Roaming. Legacy session `<id>.json` files remain readable.
 - Transcript JSONL: header line `{"t":"header","v":2,"id","model",
   "cwd","created_at"}` (epoch seconds), then `msg` (`d.role`,
   `d.content[].text`), `meta` (`title`, `token_usage` — cumulative,
@@ -17,13 +19,16 @@
   build/plan only; print mode hardcodes build).
 - Pane signatures: working = braille spinner (U+2800–U+28FF frames,
   80 ms) in the status bar's last line and on running tool headers;
-  blocked = the `╭ Permission Required ─╮` overlay (y Allow / n Deny
-  rows). Maki never sets the OSC window title itself (that API is
+  blocked = the `╭ Permission Required ─╮` overlay and the question
+  form. The spinner keeps moving while these forms await input. Maki
+  never sets the OSC window title itself (that API is
   exposed to users/plugins via `maki.ui.set_window_title`), so state
   rules read the body only.
 - `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` are honored like the
-  official SDKs, so the existing config-driven OpenRouter routing
-  (`[openrouter] route_agents`) applies without code.
+  official SDKs. The generic OpenRouter wrapper only redirects Maki
+  when its selected provider uses the OpenAI platform API. It does not
+  select a model or redirect an Anthropic or Coding Plan session; use
+  Maki's native OpenRouter provider when that is the intended provider.
 
 ### Decisions
 
@@ -40,15 +45,27 @@
    later adds a marker, it is a two-line change (parse + case).
 4. **Detection rules from live fixtures** — `testdata/panes/
    maki_{idle,working,permission}.txt` captured from a real v0.6.0
-   session via the documented tmux recipe; rules carry `require_idle`
-   on the blocked rule (a frozen dialog on a dead pane is not a
-   request) and none on the spinner (the daemon's signs-of-life check
-   covers frozen frames).
+   session via the documented tmux recipe. Tests run each captured
+   pane through the public classifier with fresh and quiet timestamps.
+   Explicit dialogs bypass the idle gate because their spinner still
+   animates; the daemon's signs-of-life check covers a dead process.
 5. **Usage: bespoke walker** — `internal/makiusage` (agentusage's
    Summary contract) because the generic walker matches `usage` keys /
    top-level token fields, not maki's cumulative `token_usage` inside
-   `meta`. Last-meta-per-file wins; cache tokens ignored (consistent
-   with the generic walker); user turns exclude `[Cancelled by user]`
-   markers.
+   `meta`. Only snapshot deltas in the window contribute tokens. For an
+   old compacted session without a baseline, the first surviving snapshot
+   seeds later deltas; its older totals cannot be assigned to the window.
+   Cache tokens are excluded, consistent with the generic walker.
+   Prompts honor `display_text` and exclude synthetic messages, host
+   observations, context updates and slash-command-only turns.
 6. **Accent: Pink** — the only design-token accent not yet assigned to
    an agent.
+
+### Compatibility evidence
+
+The review compared the storage, provider-message and CLI contracts in
+`tontinton/maki` upstream `e6fc72a4` with local fork `1120a60c`. The
+public integration uses the common `maki --continue` / `--resume`
+commands and native formats; it requires no fork plugins. Fork-only
+named runtime profiles are outside this integration. Maki does not
+record the launch mode, so print sessions cannot be filtered reliably.

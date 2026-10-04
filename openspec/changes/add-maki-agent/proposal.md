@@ -20,11 +20,13 @@ have no path today.
 - Detect Maki pane state with a bundled rule file
   (`internal/agentdetect/rules/maki.toml`) pinned to real captured pane
   fixtures: the braille status-bar spinner (working) and the
-  " Permission Required " dialog (blocked, idle-gated). Maki sets no OSC
+  " Permission Required " dialog and question forms (blocked, even
+  while the status spinner moves). Maki sets no OSC
   title of its own, so no title rules exist.
 - Parse Maki transcripts for the Conversations screen
   (`~/.local/state/maki/sessions/<id>.jsonl`, flat JSONL; the `archive/`
-  subdirectory of user-deleted sessions is skipped). Maki transcripts
+  subdirectory of old snapshots is skipped; legacy JSON, the
+  `~/.maki` layout and XDG overrides are supported). Maki transcripts
   carry no launch-mode marker (verified in upstream source: `maki -p`
   writes the same shape as interactive), so `IsHeadless()` is always
   false for maki — the Antigravity precedent.
@@ -36,10 +38,10 @@ have no path today.
   | sh`) in the doctor and setup wizard, and a placeholder Agents
   sub-tab (config is `~/.config/maki/init.lua` + `providers.toml`,
   managed by the maki CLI).
-- OpenRouter routing needs no code: it is config-driven
-  (`[openrouter] route_agents` resolves through `agent.ParseID`), and
-  maki honors `OPENAI_BASE_URL` like the official SDKs (verified in
-  upstream docs).
+- Provider and model selection remain in Maki. The generic OpenRouter
+  wrapper only redirects the OpenAI platform provider; it does not
+  change Maki's selected provider. Maki also has a native OpenRouter
+  provider.
 
 ## Capabilities
 

@@ -22,18 +22,18 @@
 - [x] 3.1 Capture real pane fixtures via the documented tmux recipe
   (`maki_idle`, `maki_working`, `maki_permission` + `.title` sidecars).
 - [x] 3.2 Add `internal/agentdetect/rules/maki.toml` (status-bar
-  braille spinner → working; " Permission Required " dialog → blocked,
-  `require_idle`) and second-wave detection test rows.
+  braille spinner → working; explicit permission and question dialogs
+  → blocked without the idle gate) and second-wave detection test rows.
 
 ## 4. Conversations & Usage
 
 - [x] 4.1 `internal/conversations/maki.go`: `ListMaki` (flat
-  `sessions/*.jsonl`, skip `archive/`), `readMakiMessages`,
+  `sessions/*.jsonl` and legacy `*.json`, skip `archive/`), `readMakiMessages`,
   `countMakiMessages`, resume dispatch, project-filter roots, package
   doc updates; `IsHeadless()` false (no marker — Antigravity
   precedent). Fixture-driven tests.
-- [x] 4.2 `internal/makiusage` walker (cumulative `token_usage` from
-  the last `meta` event; `usage_by_model` ignored for cost) wired into
+- [x] 4.2 `internal/makiusage` walker (deltas in cumulative `token_usage` between
+  `meta` snapshots; `usage_by_model` ignored for cost) wired into
   `internal/usage`'s per-agent dispatch. Fixture-driven tests.
 
 ## 5. Product Surfaces
@@ -64,3 +64,12 @@
   `ccmux doctor` shows `✓ Maki (maki)` and live
   `ccmux list-conversations` lists real maki sessions; e2e suite
   (`make test-e2e`) green.
+
+## Review corrections
+
+- [x] Honor legacy `~/.maki`, XDG overrides and Windows AppData paths.
+- [x] Read legacy JSON sessions without counting JSON/JSONL duplicates.
+- [x] Honor hidden/replaced display text and host message kinds.
+- [x] Prevent full historical totals from entering a resumed usage window.
+- [x] Test the real pane captures with both fresh and quiet timestamps.
+- [x] Test CLI listing, exact resume argv/cwd and deletion in isolated tmux.
