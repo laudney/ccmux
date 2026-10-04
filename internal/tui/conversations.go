@@ -37,6 +37,7 @@ var conversationAgentSections = []conversationAgentSectionDef{
 	{Label: "Pi", Agent: agent.IDPi},
 	{Label: "Muse", Agent: agent.IDMuse},
 	{Label: "Gemini", Agent: agent.IDGemini},
+	{Label: "Maki", Agent: agent.IDMaki},
 }
 
 const conversationColumnGap = 3
@@ -767,6 +768,7 @@ func (m conversationsModel) renderLoading(width, height int) string {
 		agent.IDGemini:      "~/.gemini/tmp",
 		agent.IDPi:          "~/.pi/agent/sessions",
 		agent.IDMuse:        "~/.local/share/muse/sessions (XDG_DATA_HOME)",
+		agent.IDMaki:        "~/.local/state/maki/sessions",
 	}
 	var legend []string
 	for _, def := range conversationAgentSections {

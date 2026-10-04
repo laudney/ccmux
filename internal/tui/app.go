@@ -1089,14 +1089,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.refreshSessionsCmd()
 
 	case openEditorMsg:
-		// A screen (Notes or Settings) asked the app to suspend and run
+		// A screen asked the app to suspend and run
 		// $EDITOR. Route the follow-up reload by Source so the right
 		// screen refreshes when control returns.
 		return a, openEditorCmd(msg.Editor, msg.Path, editorReloadMsg(msg.Source))
 
 	case agentsReloadMsg:
 		// An agent's config file was edited in $EDITOR from the Agents
-		// tab (Codex, Antigravity, Gemini) — re-read them all.
+		// tab — re-read them all.
 		a.agentsM.Reload()
 		return a, nil
 

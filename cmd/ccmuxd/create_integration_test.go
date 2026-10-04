@@ -19,21 +19,23 @@ import (
 	"github.com/skzv/ccmux/internal/project"
 )
 
-// stubAgentPath replaces PATH with a directory holding tmux and a stub
-// for each named agent binary (plus /usr/bin:/bin), so no real agent
+// stubAgentPath replaces PATH with a directory holding only test tools
+// and a stub for each named agent binary, so no real agent
 // the machine has installed can run. A stub records that it ran by
 // creating "<name>-ran" in its working directory, then stays up. Call it
 // before the test's first tmux command: the tmux server, and so every
 // pane, keeps the PATH it started with.
 func stubAgentPath(t *testing.T, names ...string) {
 	t.Helper()
-	tmuxBin, err := exec.LookPath("tmux")
-	if err != nil {
-		t.Skip("tmux not installed")
-	}
 	dir := t.TempDir()
-	if err := os.Symlink(tmuxBin, filepath.Join(dir, "tmux")); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"tmux", "sh", "sleep", "touch"} {
+		bin, err := exec.LookPath(name)
+		if err != nil {
+			t.Skipf("%s not installed", name)
+		}
+		if err := os.Symlink(bin, filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, name := range names {
 		script := "#!/bin/sh\ntouch \"$PWD/" + name + "-ran\"\nexec sleep 300\n"
@@ -41,7 +43,8 @@ func stubAgentPath(t *testing.T, names ...string) {
 			t.Fatal(err)
 		}
 	}
-	t.Setenv("PATH", dir+":/usr/bin:/bin")
+	t.Setenv("PATH", dir)
+	t.Setenv("SHELL", "/bin/sh")
 }
 
 // newAPIServer serves the daemon's tailnet-safe routes for dir's sandbox.

@@ -465,6 +465,8 @@ func installHintFor(id agent.ID) string {
 		return "curl -fsSL https://dev.meta.ai/install.sh | bash  (macOS: brew install --cask muse-code); then muse login"
 	case agent.IDKiro:
 		return "see https://kiro.dev/docs/cli"
+	case agent.IDMaki:
+		return "curl -fsSL https://maki.sh/install.sh | sh"
 	}
 	return ""
 }
@@ -980,8 +982,9 @@ func defaultAgentChoices(ctx context.Context, cfg config.Config) []agent.ID {
 	}
 
 	choices := []agent.ID{agent.IDClaude}
-	for _, id := range []agent.ID{agent.IDCodex, agent.IDAntigravity, agent.IDCursor, agent.IDPi, agent.IDGemini} {
-		if available[id] {
+	for _, a := range agent.All() {
+		id := a.ID()
+		if id != agent.IDClaude && available[id] {
 			choices = append(choices, id)
 		}
 	}
@@ -1003,6 +1006,11 @@ func defaultAgentLabel(id agent.ID) string {
 	case agent.IDPi:
 		return "Pi"
 	default:
+		for _, a := range agent.All() {
+			if a.ID() == id {
+				return a.DisplayName()
+			}
+		}
 		return string(id)
 	}
 }

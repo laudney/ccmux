@@ -17,7 +17,7 @@ import (
 // and binding it must leave it unchanged.
 func TestDefaultAgentOptions_KeepsCurrentValue(t *testing.T) {
 	choices := []agent.ID{agent.IDClaude, agent.IDCodex}
-	for _, current := range []string{"grok", "muse", "opencode", "codex", "claude", "shell"} {
+	for _, current := range []string{"grok", "muse", "opencode", "maki", "codex", "claude", "shell"} {
 		t.Run(current, func(t *testing.T) {
 			opts := defaultAgentOptions(choices, current)
 			count := 0

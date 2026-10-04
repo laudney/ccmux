@@ -216,6 +216,10 @@ func TestClassifyAgent_SecondWaveDetection(t *testing.T) {
 		{"amp title spinner", "amp", Input{Title: "⠧ working"}, StateActive},
 		{"kiro title spinner", "kiro", Input{Title: "⠏ working"}, StateActive},
 
+		// Maki sets no OSC title (the window title is user/plugin
+		// territory), so its rules read the pane body only.
+		{"maki status spinner", "maki", Input{Pane: "you> run the checks\n❯ Queue another prompt...\n──────────────\n ⠹ [BUILD] ~/Code/ccmux:main  15.3k/1.0m (1%)"}, StateActive},
+
 		// Per-agent blocked prompts → needs_input.
 		{"opencode permission", "opencode", Input{Pane: "some output\n△ Permission required\nallow this tool?"}, StateNeedsInput},
 		{"kilo permission", "kilo", Input{Pane: "△ Permission required to run command"}, StateNeedsInput},
@@ -226,6 +230,7 @@ func TestClassifyAgent_SecondWaveDetection(t *testing.T) {
 		{"kiro approval", "kiro", Input{Pane: "This action requires approval.\n  yes, single permission"}, StateNeedsInput},
 		{"hermes dangerous", "hermes", Input{Pane: "dangerous command detected\n  allow once\n  deny"}, StateNeedsInput},
 		{"kimi approval", "kimi", Input{Pane: "Kimi wants to run command\n  ↵ confirm  ·  esc cancel"}, StateNeedsInput},
+		{"maki permission", "maki", Input{Pane: "⠼ write> /tmp/fixture-probe.txt\n╭ Permission Required ───────────────────────────────────────────────╮\n│  tool  write                                                        │\n│  y Allow  a Project (this session)  A Always (all projects, saved)  │\n│  n Deny   d Deny project (this session)  D Deny-always (all, saved) │\n╰──────────────────────────────────────────────────────────────────────╯\n ⠹ [BUILD] ~/Code/ccmux:main  14.1k/1.0m (1%)"}, StateNeedsInput},
 
 		// Per-agent working footers → active.
 		{"opencode working", "opencode", Input{Pane: "generating code…\n(esc to interrupt)"}, StateActive},

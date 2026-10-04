@@ -14,7 +14,7 @@ import (
 )
 
 // newListConversationsCmd: `ccmux list-conversations` prints a flat
-// table of past agent conversations (Claude + Codex + Antigravity)
+// table of past conversations from supported transcript readers,
 // sorted by recency. This is the CLI mirror of the Conversations
 // TUI screen — same data source, same row order — useful for
 // scripting and as the end-to-end smoke test of the data layer.
@@ -42,13 +42,15 @@ whether ccmux launched them. Sources:
   Antigravity  ~/.gemini/antigravity-cli/conversations/<uuid>.pb
   Muse Code    $XDG_DATA_HOME/muse/sessions/<yyyy>/<mm>/<dd>/<uuid>/session.jsonl
                (defaults to ~/.local/share/muse/sessions)
+  Maki         $XDG_STATE_HOME/maki/sessions/<id>.jsonl (or legacy .json)
+               (defaults to ~/.local/state/maki/sessions; ~/.maki if present)
 
 Antigravity transcripts are opaque protobuf, so the preview column is
 empty for those rows. ID and last-activity are always populated.
 
 Headless runs are hidden by default — that's Claude ` + "`claude -p`" + ` / SDK
 invocations (entrypoint=sdk-cli) and Codex ` + "`codex exec`" + ` runs
-(originator=codex_exec). Antigravity transcripts carry no headless tag
+(originator=codex_exec). Antigravity and Maki transcripts carry no headless tag
 so those rows are always shown. Pass --include-headless to see them,
 or set conversations.show_headless=true in config.
 

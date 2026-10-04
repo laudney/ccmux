@@ -125,25 +125,25 @@ func ServicePathOrEmpty() string {
 }
 
 // UnitFile returns the printable systemd-user unit for users who'd
-// rather install manually. Same content the linux Install() writes.
+// rather install manually. Its PATH includes detected agent directories.
 func UnitFile(binary string) string {
-	return UnitFileWithPath(binary, "%h/.local/bin:/usr/local/bin:/usr/bin:/bin")
+	return UnitFileWithPath(binary, managedPath("%h", agent.Commands{}, "/usr/local/bin", "/usr/bin", "/bin"))
 }
 
 func UnitFileWithPath(binary, pathEnv string) string {
 	return fmt.Sprintf(`[Unit]
-Description=ccmux daemon (Claude Code session supervisor)
+Description=ccmux daemon (coding agent session supervisor)
 After=default.target
 
 [Service]
 ExecStart=%s
 Restart=on-failure
 RestartSec=3
-Environment=PATH=%s
+Environment=%q
 
 [Install]
 WantedBy=default.target
-`, binary, pathEnv)
+`, binary, "PATH="+pathEnv)
 }
 
 func managedPath(home string, commands agent.Commands, defaults ...string) string {
@@ -161,9 +161,26 @@ func managedPath(home string, commands agent.Commands, defaults ...string) strin
 		parts = append(parts, p)
 	}
 	add(filepath.Join(home, ".local", "bin"))
-	for _, cmd := range []string{commands.Claude, commands.Codex, commands.Antigravity, commands.Cursor, commands.Pi, commands.Grok, commands.Gemini} {
+	for _, cmd := range []string{commands.Claude, commands.Codex, commands.Antigravity, commands.Cursor, commands.Pi, commands.Grok, commands.Muse, commands.Gemini} {
 		if cmd = strings.TrimSpace(cmd); cmd != "" {
 			add(filepath.Dir(cmd))
+		}
+	}
+	// Include PATH-installed agents such as Maki in ~/.cargo/bin. Keep
+	// their directories in the caller's PATH order so different installed
+	// versions resolve consistently when the service launches an agent.
+	agentDirs := map[string]bool{}
+	for _, a := range agent.All() {
+		for _, candidate := range agent.Candidates(a) {
+			agentDirs[filepath.Dir(candidate)] = true
+		}
+	}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if dir == "" {
+			continue
+		}
+		if absolute, err := filepath.Abs(dir); err == nil && agentDirs[absolute] {
+			add(absolute)
 		}
 	}
 	for _, p := range defaults {

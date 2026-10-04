@@ -152,6 +152,14 @@ func (b agentBrowser) AtFirstItem() bool {
 // nowhere to hand off to).
 func (b agentBrowser) HasItems() bool { return firstItemIndex(b.flat) != -1 }
 
+// SelectedItem returns the item whose preview is currently shown.
+func (b agentBrowser) SelectedItem() (agentBrowserItem, bool) {
+	if b.cursor < 0 || b.cursor >= len(b.flat) || b.flat[b.cursor].item == nil {
+		return agentBrowserItem{}, false
+	}
+	return *b.flat[b.cursor].item, true
+}
+
 // GotoFirstItem moves the cursor to the first selectable item and
 // resets focus to the list pane. The Claude screen calls this when the
 // user navigates down out of the settings rows into the browser, so

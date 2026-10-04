@@ -105,9 +105,9 @@ The new-project form also picks the agent (Claude, Codex, Cursor, and more) for 
 <img src="docs/vhs/out/cuj04_resume.gif" alt="ccmux Conversations screen showing past Claude / Codex / Antigravity threads sorted by recency. Selecting one and pressing Enter resumes the agent with the correct session ID." width="900" />
 </div>
 
-ccmux remembers every past Claude / Codex / Antigravity thread, sorted by recency. Press `2` for the Conversations screen, navigate, press `Enter`. The daemon resumes the agent with the correct session ID. You don't type `claude --resume <hash>` ever again.
+ccmux lists past conversations from supported agents, including Maki, sorted by recency. Press `3` for the Conversations screen, navigate, press `Enter`. The daemon resumes the agent with the correct session ID.
 
-Headless agent runs (`claude -p`, `codex exec`, SDK invocations) are filtered out by default so a scripted workflow doesn't drown the list — press `H` to toggle them back on.
+Known headless agent runs (`claude -p`, `codex exec`, SDK invocations) are filtered out by default so a scripted workflow doesn't drown the list — press `H` to toggle them back on. Maki does not persist a headless marker, so its print-mode sessions cannot be filtered reliably.
 
 ---
 
@@ -117,9 +117,9 @@ Headless agent runs (`claude -p`, `codex exec`, SDK invocations) are filtered ou
 <img src="docs/vhs/out/cuj05_pick_agent.gif" alt="ccmux new-project form: cycle Claude / Codex / Antigravity / Cursor with arrow keys, the agent picker writes the per-project choice into .ccmux/agent." width="900" />
 </div>
 
-Pick per project which AI runs it — ccmux works with [Claude Code](https://claude.ai/code), [Codex](https://github.com/openai/codex), [Antigravity CLI](https://antigravity.google/download), [Gemini CLI](https://geminicli.com/), [Cursor](https://cursor.com/cli), [pi](https://pi.dev), [Grok](https://x.ai/cli), [Muse Code](https://ccmux.ai/docs/muse-code/), and more, speaking each one's launch and resume dialect. The choice is sticky, stored at `<project>/.ccmux/agent`. The dashboard, daemon state-detection, and dispatch all follow per-project. Press `a` in the Projects tab to switch the selected project's agent (cycles claude → codex → antigravity → cursor → pi → grok).
+Pick per project which AI runs it — ccmux works with [Claude Code](https://claude.ai/code), [Codex](https://github.com/openai/codex), [Antigravity CLI](https://antigravity.google/download), [Gemini CLI](https://geminicli.com/), [Cursor](https://cursor.com/cli), [pi](https://pi.dev), [Grok](https://x.ai/cli), [Muse Code](https://ccmux.ai/docs/muse-code/), [Maki](https://maki.sh), and more, speaking each one's launch and resume dialect. The choice is sticky, stored at `<project>/.ccmux/agent`. The dashboard, daemon state-detection, and dispatch all follow per-project. Press `a` in the Projects tab to switch the selected project's agent (cycles through every supported agent).
 
-Dashboard rows on non-default agents get a small `[codex]`, `[antigravity]`, `[cursor]`, `[pi]`, or `[grok]` tag so a single glance tells you what's running where.
+Dashboard rows on non-default agents get a small `[codex]`, `[antigravity]`, `[cursor]`, `[pi]`, `[grok]`, or `[maki]` tag so a single glance tells you what's running where.
 
 ---
 
@@ -186,7 +186,9 @@ Notes follow you across devices: press `H` to toggle which machine you're viewin
 <img src="docs/vhs/out/cuj09_agents.gif" alt="ccmux Agents screen showing Claude, Codex, and Antigravity with install status, sign-in status, and per-agent config root path." width="900" />
 </div>
 
-One screen for "is my agent installed and signed in?" Per-agent CLI version, config root, login status, and a command palette to re-run setup or open the config directory.
+Open **[5] Agents** to use each agent's config view or CLI guidance. `ccmux doctor` checks which agent tools are installed.
+
+For Maki, open **[5] Agents → Maki** with `tab` or `h`/`l`. Select a native config file (`init.lua`, `providers.toml`, `permissions.toml`, or `mcp.toml`) with `j`/`k` and press `e` to edit it. The preview reloads when the editor returns. Use `maki auth login` to sign in.
 
 ---
 
@@ -330,9 +332,9 @@ Comment the file however you like. When ccmux saves it (a Settings row, `ccmux h
 ### 🤝 Multi-agent
 
 - Per-project agent stored in `<project>/.ccmux/agent` — sticky across sessions
-- New-project form cycles Claude / Codex / Antigravity / Cursor / pi / Grok with `←/→`
+- New-project form cycles through every supported agent with `←/→`
 - Press `a` in Projects to switch the selected project's agent
-- Dashboard rows on non-default agents get a small `[codex]`, `[antigravity]`, `[cursor]`, `[pi]`, or `[grok]` tag
+- Dashboard rows on non-default agents get a small `[codex]`, `[antigravity]`, `[cursor]`, `[pi]`, `[grok]`, or `[maki]` tag
 - Daemon state-detection (active / idle / needs_input) dispatches per agent for correct heuristics
 - `ccmux doctor` enumerates installed agents; setup wizard points at the right install command for each
 - Moshi push integration is currently Claude-only — Codex / Antigravity sessions get the audible terminal bell (still triggers a generic iOS push). Phase-2 work tracked in [`docs/01_Specs/02_Multi_Agent.md`](docs/01_Specs/02_Multi_Agent.md)

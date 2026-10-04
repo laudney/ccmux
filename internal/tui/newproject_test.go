@@ -435,7 +435,8 @@ func TestNextAgent(t *testing.T) {
 		{agent.IDAmp, agent.IDKiro},
 		{agent.IDKiro, agent.IDMuse},
 		{agent.IDMuse, agent.IDGemini},
-		{agent.IDGemini, agent.IDClaude},
+		{agent.IDGemini, agent.IDMaki},
+		{agent.IDMaki, agent.IDClaude},
 		// Edge: "" is a project with no sidecar, i.e. Claude; unknown
 		// values land on the first agent.
 		{"", agent.IDCodex},

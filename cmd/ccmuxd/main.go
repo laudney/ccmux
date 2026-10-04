@@ -1164,7 +1164,7 @@ func (s *server) createBareSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Order: explicit request agent → daemon's
-	// sessions.default_agent → $SHELL. Bare sessions don't carry
+	// agents.default → $SHELL. Bare sessions don't carry
 	// --continue because they're not tied to a project transcript.
 	launch := bareSessionLaunchCmd(req.Agent, s.cfg.Agents.Default, s.freshCommands())
 	// Tag what actually runs there, in the same tmux call that
@@ -1804,8 +1804,8 @@ func toUsageSummary(s usage.AgentSummary) daemon.UsageSummary {
 	}
 }
 
-// handleConversations returns past agent transcripts (Claude, Codex,
-// Cursor, Antigravity) from the daemon's home directory. Sorted most-recent
+// handleConversations returns supported agent transcripts from the
+// daemon's home directory. Sorted most-recent
 // first; clients can do their own filtering. Headless / SDK runs are
 // excluded by default — they pile up fast in automation and aren't
 // usually what a user means by "my conversations".

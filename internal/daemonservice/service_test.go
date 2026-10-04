@@ -1,6 +1,7 @@
 package daemonservice
 
 import (
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -45,17 +46,49 @@ func TestUnitFile_BinaryPathSubstituted(t *testing.T) {
 	}
 }
 
+func TestUnitFile_PATHWithSpaces(t *testing.T) {
+	body := UnitFileWithPath("/usr/bin/ccmuxd", "/home/user/agent tools/bin:/usr/bin")
+	if !strings.Contains(body, "\nEnvironment=\"PATH=/home/user/agent tools/bin:/usr/bin\"\n") {
+		t.Fatalf("service PATH must be one environment assignment: %s", body)
+	}
+}
+
 func TestManagedPath_IncludesConfiguredCommandBeforeDefaults(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
 	got := managedPath("/Users/me", agent.Commands{
 		Claude:      "/Users/me/.nvm/versions/node/v23.9.0/bin/claude",
 		Codex:       "/Users/me/.nvm/versions/node/v23.9.0/bin/codex",
 		Antigravity: "/Users/me/.local/share/antigravity/bin/agy",
 		Cursor:      "/Users/me/.cursor/bin/cursor-agent",
 		Grok:        "/Users/me/.grok/bin/grok",
+		Muse:        "/Users/me/.muse/bin/muse",
 	}, "/opt/homebrew/bin", "/usr/bin")
-	wantPrefix := "/Users/me/.local/bin:/Users/me/.nvm/versions/node/v23.9.0/bin:/Users/me/.local/share/antigravity/bin:/Users/me/.cursor/bin:/Users/me/.grok/bin:/opt/homebrew/bin"
+	wantPrefix := "/Users/me/.local/bin:/Users/me/.nvm/versions/node/v23.9.0/bin:/Users/me/.local/share/antigravity/bin:/Users/me/.cursor/bin:/Users/me/.grok/bin:/Users/me/.muse/bin:/opt/homebrew/bin"
 	if !strings.HasPrefix(got, wantPrefix) {
 		t.Fatalf("managedPath = %q, want prefix %q", got, wantPrefix)
+	}
+}
+
+func TestManagedPath_IncludesInstalledAgentsInPATHOrder(t *testing.T) {
+	home := t.TempDir()
+	cargo := filepath.Join(home, ".cargo", "bin")
+	droid, unrelated := t.TempDir(), t.TempDir()
+	for dir, binary := range map[string]string{cargo: "maki", droid: "droid"} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, binary), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", strings.Join([]string{cargo, unrelated, droid, cargo}, string(os.PathListSeparator)))
+	got := managedPath(home, agent.Commands{}, "/usr/bin", "/bin")
+	want := strings.Join([]string{filepath.Join(home, ".local", "bin"), cargo, droid, "/usr/bin", "/bin"}, ":")
+	if got != want {
+		t.Fatalf("service PATH = %q, want %q", got, want)
+	}
+	if unit := UnitFile("/usr/bin/ccmuxd"); !strings.Contains(unit, cargo) {
+		t.Fatal("manual unit output omits the detected Maki directory")
 	}
 }
 

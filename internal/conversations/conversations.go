@@ -13,6 +13,7 @@
 //	Cursor:       ~/.cursor/projects/<encoded-cwd>/agent-transcripts/<uuid>/<uuid>.jsonl
 //	Antigravity:  ~/.gemini/antigravity-cli/conversations/<uuid>.pb
 //	Gemini:       ~/.gemini/tmp/<project>/chats/*.json / *.jsonl
+//	Maki:         native sessions/<id>.jsonl or legacy .json; archive/ skipped
 //
 // Claude, Codex, and Cursor use JSONL. Known fragments for the same logical
 // conversation are merged in memory: Claude parent/subagent files by
@@ -27,6 +28,7 @@
 //	Codex:        codex resume <uuid>
 //	Cursor:       cursor-agent --resume <uuid>
 //	Antigravity:  agy --conversation <uuid>
+//	Maki:         maki --resume <id>
 //
 // All four accept the conversation by ID, so a user picking a row in
 // ccmux's UI gets handed straight to the right resume invocation
@@ -138,6 +140,8 @@ type Conversation struct {
 //   - Codex     → originator == "codex_exec", or a subagent rollout
 //     (guardian review, thread_spawn)
 //   - Antigravity → never (known transcript formats carry no signal)
+//   - Maki → never (same as Antigravity: maki transcripts carry no
+//     launch-mode marker — `maki -p` writes the same shape)
 //
 // Adding a new headless mode to an existing agent only needs an extra
 // case here — every TUI/CLI surface routes through this predicate.
@@ -234,6 +238,8 @@ func (c Conversation) ResumeArgsWithCommands(commands agent.Commands) []string {
 		return agent.ResumeArgs(agent.IDCursor, c.ID, commands)
 	case agent.IDPi:
 		return agent.ResumeArgs(agent.IDPi, c.ID, commands)
+	case agent.IDMaki:
+		return agent.ResumeArgs(agent.IDMaki, c.ID, commands)
 	}
 	// Unknown agent — empty argv; caller should treat as "can't
 	// resume" rather than spawn something bogus.
@@ -312,6 +318,14 @@ func RecentMessages(c Conversation, limit int) ([]Message, error) {
 	case agent.IDPi:
 		for _, path := range paths {
 			msgs, err := readPiMessages(path, limit)
+			if err != nil {
+				return nil, err
+			}
+			all = append(all, msgs...)
+		}
+	case agent.IDMaki:
+		for _, path := range paths {
+			msgs, err := readMakiMessages(path, limit)
 			if err != nil {
 				return nil, err
 			}
@@ -504,6 +518,14 @@ func CountMessages(c Conversation) (int, error) {
 	case agent.IDPi:
 		for _, path := range paths {
 			n, err := countPiMessages(path)
+			if err != nil {
+				return 0, err
+			}
+			total += n
+		}
+	case agent.IDMaki:
+		for _, path := range paths {
+			n, err := countMakiMessages(path)
 			if err != nil {
 				return 0, err
 			}
@@ -772,6 +794,9 @@ func guardTranscriptPath(home string, agentID agent.ID, path string) error {
 		allowed = []transcriptRoot{{root: filepath.Join(home, ".cursor", "projects"), ext: ".jsonl"}}
 	case agent.IDPi:
 		allowed = []transcriptRoot{{root: filepath.Join(home, ".pi", "agent", "sessions"), ext: ".jsonl"}}
+	case agent.IDMaki:
+		root := agent.ByID(agent.IDMaki).TranscriptsRoot(home)
+		allowed = []transcriptRoot{{root: root, ext: ".jsonl"}, {root: root, ext: ".json"}}
 	case agent.IDAntigravity:
 		allowed = []transcriptRoot{
 			{root: filepath.Join(home, ".gemini", "antigravity-cli", "conversations"), ext: ".pb"},
@@ -871,6 +896,7 @@ func All(opts Options) ([]Conversation, error) {
 		ListGemini,
 		ListPi,
 		ListMuse,
+		ListMaki,
 	} {
 		got, err := fn(opts.HomeDir)
 		if err != nil {

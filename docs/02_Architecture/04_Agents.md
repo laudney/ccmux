@@ -1,6 +1,6 @@
-# Agents (Claude Code, Codex, Antigravity)
+# Agents
 
-ccmux supervises four interactive AI coding agents through a single
+ccmux supervises registered interactive AI coding agents through a single
 strategy interface. This doc is the implementer's view; for the user-
 facing story see the README's *Multi-agent* card, and for the original
 plan see [`docs/01_Specs/02_Multi_Agent.md`](../01_Specs/02_Multi_Agent.md).
@@ -8,24 +8,27 @@ plan see [`docs/01_Specs/02_Multi_Agent.md`](../01_Specs/02_Multi_Agent.md).
 ## Where the abstraction lives
 
 ```
-internal/agent/                       ← strategy interface + 3 impls
+internal/agent/                       ← strategy interface + impls
 ├── agent.go        ← Agent interface, ID enum, State enum, registry
 ├── claude.go       ← Claude{}  (delegates to internal/claude)
-├── codex.go        ← Codex{}   (v1 idle-heuristic classifier stub)
-├── antigravity.go  ← Antigravity{}  (same)
-└── cursor.go       ← Cursor{}  (same)
+├── codex.go        ← Codex{}
+├── antigravity.go  ← Antigravity{}
+├── cursor.go       ← Cursor{}
+├── maki.go         ← Maki{}    (tontinton/maki; XDG config/state split)
+└── …               ← one file per agent, all with the same shape
 ```
 
-The package exports six things callers reach for:
+The package exports these operations:
 
 | Symbol | Purpose |
 |---|---|
-| `agent.ID` | Canonical id type. Values: `claude`, `codex`, `antigravity`, `cursor`, `gemini` (Gemini CLI is independent of Antigravity). Load-bearing — written verbatim into `.ccmux/agent`. |
-| `agent.Agent` | The strategy interface (ID, Binary, LaunchCmd, ConfigRoot, TranscriptsRoot, InitialPrompt, Classify). |
+| `agent.ID` | Canonical id type, written verbatim into `.ccmux/agent`. `All()` enumerates the supported IDs. |
+| `agent.Agent` | The strategy interface (ID, DisplayName, Binary, LaunchCmd, ConfigRoot, TranscriptsRoot, InitialPrompt, Classify). |
 | `agent.All()` | Canonical-order list of every shipped agent. Order matters: pickers default to first installed. |
 | `agent.ByID(id)` | Unchecked lookup. Empty string → claude (back-compat). Panics on unknown — callers route user input through ParseID first. |
 | `agent.ParseID(s)` | Whitespace-tolerant parser for sidecar / config / CLI flags. |
 | `agent.AllInstalled(ctx)` | Subset of All() whose Binary() resolves on $PATH. |
+| `agent.AllAvailable(ctx, commands)` | Available agents, including configured executable paths. |
 | `agent.Default()` | Locked at Claude — the back-compat default for every legacy project. |
 
 ## Per-project agent: `<project>/.ccmux/agent`
@@ -125,28 +128,30 @@ boolean, and dashboard row ordering don't have to change.
 ## TUI surface
 
 - **Projects → `n` (new):** form's 4th row is an agent picker
-  populated from `agent.AllInstalled()` (or `All()` if nothing is
+  populated from `agent.AllAvailable()` (or `All()` if nothing is
   installed). Submit carries the chosen `agent.ID` through.
 - **Projects → `a` (switch):** on the selected local project, cycles
-  through agents in canonical order (claude → codex → antigravity → cursor → claude),
+  through agents in canonical order (… → maki → claude),
   writes the sidecar, toasts the result. Remote-project switching is
   currently a "not yet supported" toast — adding a daemon endpoint for
   in-place sidecar mutation on remotes is a Phase-4-remaining item.
-- **Dashboard rows:** non-default agents get a `[codex]` / `[antigravity]` / `[cursor]`
-  tag in muted styling. Claude rows show nothing (the 95% case stays
-  visually clean).
+- **Dashboard rows:** non-default agents get a tag with their registered
+  ID, such as `[maki]`. Claude rows omit the tag.
+- **Agents:** `agentConfigSubtabs()` lists implemented config browsers
+  and help views. A new agent needs an explicit Update/View implementation
+  to appear here; registration alone does not create a config editor.
 
 ## Conversations: hiding automation noise
 
 The Conversations screen and `ccmux list-conversations` enumerate every
-on-disk transcript across all three agents. For users who wire Claude
+on-disk transcript from supported readers. For users who wire Claude
 into automation (shell wrappers, the SDK, `claude -p` one-shots) the
 list is dominated by single-turn rows that swamp the actual interactive
 work — sometimes 20%+ of every transcript on disk.
 
-Each agent records a launch-mode tag on its transcript; `Conversation.Entrypoint`
-holds the raw value and `IsHeadless()` is the per-agent predicate that
-collapses it to a yes/no:
+Where an agent records a launch-mode tag, `Conversation.Entrypoint` holds
+the raw value. `IsHeadless()` is the per-agent predicate that uses available
+signals to identify automation runs. Examples:
 
 - **Claude** — `entrypoint` field on every user event in the JSONL
   transcript:
@@ -167,6 +172,8 @@ collapses it to a yes/no:
   disk), so no signal is available. `Entrypoint` is always empty and
   `IsHeadless()` always returns false; rows are never filtered by this
   toggle.
+- **Maki** — native transcripts have no launch-mode marker. `IsHeadless()`
+  returns false, including for print-mode runs.
 
 `conversations.All(Options{ExcludeHeadless: true})` filters headless
 rows out after the sort. The package itself stays policy-neutral
@@ -194,35 +201,30 @@ two-line change: parse the launch-mode tag into `Conversation.Entrypoint`
 in the agent's `read…Transcript` walker, then add a `case` to
 `IsHeadless()`. Every TUI/CLI surface routes through that predicate.
 
-## What's deliberately not abstracted (v1)
+## Agent-specific data and configuration
 
-- **Usage panel** — `internal/claudeusage` still walks `~/.claude/projects/*/*.jsonl`
-  and shows Claude-only stats on the dashboard. Codex's
-  `~/.codex/sessions/` and Antigravity's `~/.gemini/antigravity-cli/conversations/`
-  formats are different shapes; the walkers need real fixture
-  samples that we don't have until users adopt those agents.
-  Tracked in spec.
-- **Config tab** — the "Claude" TUI screen still manages
-  `~/.claude/settings.json`. A future "Agents" screen with per-agent
-  sub-panes will need its own design pass; Codex and Antigravity's config
-  surfaces aren't stable enough for a useful TUI viewer today.
-- **Mobile push categorization** — moshi-hook lives in Claude Code's
-  hooks system. Codex/Antigravity get the audible BEL (which iOS clients
-  turn into a generic push). A daemon-side notification dispatcher
-  that works for all three is its own multi-week project.
+`internal/usage` dispatches to agent-specific usage walkers because native
+formats differ. Maki's cumulative snapshots use `internal/makiusage`.
+The dashboard displays rows for agents with usable data.
 
-## Adding a fourth agent
+Config views also follow each agent's native format. The Agents screen
+contains structured editors, file browsers, and CLI guidance. Maki's
+file browser uses the shared editor flow without interpreting Lua or TOML.
+
+## Adding an agent
 
 The shape is intentionally additive. To add, say, `qwen`:
 
-1. Implement `internal/agent/qwen.go` with the seven methods.
-2. Add `IDQwen` and the new instance to `agent.All()` (preserve
-   canonical order — append to the end).
+1. Implement `internal/agent/qwen.go` with the strategy interface.
+2. Add `IDQwen` and the new instance to `agent.All()`, `ByID`, and
+   `ParseID` (preserve canonical order — append to the end).
 3. Add the install hint to `cmd/ccmux/cmd/subcommands.go`
    `agentInstallHint` and `internal/setupwizard/wizard.go`
    `installHintFor`.
-4. (When the daemon's classifier gets tightened) drop pane-content
-   fixtures into `internal/agent/testdata/qwen_*.txt`.
+4. Add `internal/agentdetect/rules/qwen.toml` and real pane fixtures.
+   Test the classifier, including active permission dialogs and quiet panes.
+5. Add transcript/usage readers and resume arguments when supported.
+   Add a config sub-tab together with its Update/View implementation.
 
 > **Google CLI identities** — `IDGemini` launches `gemini` and `IDAntigravity`
 > launches `agy`. Google continues to support Gemini CLI for Code Assist
@@ -232,6 +234,37 @@ The shape is intentionally additive. To add, say, `qwen`:
 > through `.project_root` markers or `~/.gemini/projects.json`. Antigravity’s
 > protobuf conversations remain separate. Settings/credentials are not migrated.
 
-The protocol, sidecar shape, picker UI, doctor flow, and dashboard
-badge all pick it up automatically — there is no other place to
-register the new agent.
+The protocol, sidecar shape, default selectors, MCP launch descriptions,
+doctor flow, and dashboard badge use the registry. Conversation, usage,
+and configuration support require their own implementations and tests.
+
+### Maki compatibility
+
+Maki uses the same public CLI and transcript format in upstream
+`tontinton/maki` and the maintained fork. ccmux launches `maki`, continues
+with `maki --continue`, and resumes a conversation with `maki --resume <id>`.
+No fork plugin is required. Provider and model selection remain in Maki.
+
+In **Agents → Maki**, the file list and preview show `init.lua`,
+`providers.toml`, `permissions.toml`, and `mcp.toml`. Select a file with
+`j`/`k` or the arrow keys and press `e` to open it in the editor. The
+preview reloads after the editor returns. Missing files can be created
+in the editor; opening the pane does not write config files.
+
+The setup and Settings default-agent choices use the shared registry.
+Daemon service installation preserves detected agent directories from
+PATH, including Rust installations such as Maki in `~/.cargo/bin`.
+
+Config and state use `~/.maki` when that directory exists. Otherwise,
+Unix uses the XDG roots (`~/.config/maki` and `~/.local/state/maki` by
+default); Windows uses AppData/Roaming. Conversations read top-level
+JSONL and legacy JSON sessions. JSONL takes precedence, and `archive/`
+snapshots do not appear as separate conversations. Hidden synthetic
+messages and host observations are excluded from previews.
+
+The usage row counts deltas between cumulative snapshots. If compaction
+removed the baseline for an old session, the first surviving snapshot
+only seeds later deltas; its historical totals have no reliable window.
+Maki transcripts also lack a print-mode marker, so ccmux cannot distinguish
+interactive and headless runs. Fork-only named runtime profiles are outside
+this integration.

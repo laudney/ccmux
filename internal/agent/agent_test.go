@@ -19,7 +19,7 @@ func TestAll_CanonicalOrder(t *testing.T) {
 	got := All()
 	wantIDs := []ID{
 		IDClaude, IDCodex, IDAntigravity, IDCursor, IDPi, IDGrok,
-		IDOpenCode, IDKimi, IDDroid, IDCopilot, IDQoder, IDKilo, IDHermes, IDAmp, IDKiro, IDMuse, IDGemini,
+		IDOpenCode, IDKimi, IDDroid, IDCopilot, IDQoder, IDKilo, IDHermes, IDAmp, IDKiro, IDMuse, IDGemini, IDMaki,
 	}
 	if len(got) != len(wantIDs) {
 		t.Fatalf("All() len = %d, want %d", len(got), len(wantIDs))
@@ -47,6 +47,8 @@ func TestAll_EveryAgentIsComplete(t *testing.T) {
 	// XDG overrides, including the ones GitHub runners export.
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("XDG_DATA_HOME", "")
+	t.Setenv("XDG_STATE_HOME", "")
+	t.Setenv("APPDATA", "")
 	home := "/home/tester"
 	for _, a := range All() {
 		id := a.ID()
@@ -288,6 +290,7 @@ func TestLaunchCmd_ContinueCommandPerAgent(t *testing.T) {
 		IDKiro:        "kiro-cli --continue || kiro-cli || zsh || bash || sh",
 		IDMuse:        "muse resume --last || muse || zsh || bash || sh",
 		IDGemini:      "gemini --resume || gemini || zsh || bash || sh",
+		IDMaki:        "maki --continue || maki || zsh || bash || sh",
 	}
 	for _, a := range All() {
 		t.Run(string(a.ID()), func(t *testing.T) {

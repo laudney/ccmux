@@ -196,13 +196,13 @@ a requested agent to `<project>/.ccmux/agent`.
   when the tagged name is taken as well.
 
 #### `POST /v1/sessions/bare`
-Create a **shell-only** tmux session not tied to any project (no scaffold).
+Create a tmux session for a selected agent or shell, without a project scaffold.
 - **Request:** `NewBareSessionRequest`.
 - **Response `200`:** `NewBareSessionResponse` (for an existing session of
   that name, the directory it really runs in).
 - `path` empty resolves to `sessions.default_dir` or `$HOME` **on the daemon
   host** (never the client's home). `agent` empty falls back to
-  `sessions.default_agent` then `$SHELL`; `"shell"` means no agent; any
+  `agents.default` then `$SHELL`; `"shell"` means no agent; any
   other value must be a known agent id (`400` otherwise).
 - **Errors:** as `POST /v1/sessions`; `409` only when `path` is given and an
   existing session of that name runs elsewhere.
@@ -289,10 +289,11 @@ under the projects root, and start an agent session inside it.
 ### Conversations, usage, notes
 
 #### `GET /v1/conversations`
-Past agent transcripts (Claude / Codex / Cursor / Antigravity) in the
-daemon's home dir, most-recent first. Headless/SDK runs excluded.
-- **Response `200`:** `[]Conversation`. `id` is the agent's own UUID (what
-  you'd pass to its `--resume`).
+Past conversations from supported transcript readers, including Maki,
+in the daemon's home dir, most-recent first. Known headless/SDK runs are
+excluded; Maki has no persisted marker for that filter.
+- **Response `200`:** `[]Conversation`. `id` is the agent's native session
+  identifier, used by its resume command.
 
 #### `GET /v1/usage`
 Per-agent token + cost activity over a rolling window, plus Claude's current

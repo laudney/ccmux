@@ -540,6 +540,8 @@ func TestSettings_AgentsDefault_AcceptsValidIDs(t *testing.T) {
 		{"antigravity", "antigravity"},
 		// Gemini remains distinct from Antigravity.
 		{"gemini", "gemini"},
+		{"maki", "maki"},
+		{"  MAKI  ", "maki"},
 		{"shell", "shell"},
 		{"  CODEX  ", "codex"},
 		// Empty resets to claude (the default-of-default) — see field
@@ -726,8 +728,8 @@ func TestSettings_NarrowLayout(t *testing.T) {
 }
 
 // TestSettings_AgentsDefault_CyclePicker — the agents.default row is a
-// cycle-picker: pressing Enter advances claude → codex → antigravity →
-// cursor → shell (wrapping) and persists each step, instead of opening the
+// cycle-picker: pressing Enter advances through the registered agents
+// and shell (wrapping) and persists each step, instead of opening the
 // free-text inline editor. This is the surface the user flips to make
 // codex (or any agent) their default.
 func TestSettings_AgentsDefault_CyclePicker(t *testing.T) {
@@ -748,13 +750,22 @@ func TestSettings_AgentsDefault_CyclePicker(t *testing.T) {
 	}
 
 	// Default is claude; Enter cycles forward and wraps back to claude.
-	for _, want := range []string{"codex", "antigravity", "cursor", "gemini", "shell", "claude"} {
+	wants := make([]string, 0, len(agent.All())+1)
+	for _, a := range agent.All()[1:] {
+		wants = append(wants, string(a.ID()))
+	}
+	wants = append(wants, "shell", "claude")
+	for _, want := range wants {
 		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 		if m.editing {
 			t.Fatal("cycle-picker Enter must not open the inline editor")
 		}
 		if m.cfg.Agents.Default != want {
 			t.Fatalf("after cycle: Agents.Default = %q, want %q", m.cfg.Agents.Default, want)
+		}
+		disk, err := config.Load()
+		if err != nil || disk.Agents.Default != want {
+			t.Fatalf("cycle did not persist %q: config = %+v, error = %v", want, disk.Agents, err)
 		}
 	}
 

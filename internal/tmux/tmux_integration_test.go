@@ -300,8 +300,18 @@ func TestIntegration_ListNoServerVersusUnreachable(t *testing.T) {
 	if err := exec.CommandContext(ctx, "tmux", "kill-server").Run(); err != nil {
 		t.Fatal(err)
 	}
-	if tss, err := List(ctx); err != nil || len(tss) != 0 {
-		t.Errorf("after kill-server: List = %v, %v; want empty, no error", tss, err)
+	// kill-server acknowledges before the server has exited. A client
+	// racing that exit can report "server exited unexpectedly".
+	deadline := time.Now().Add(time.Second)
+	for {
+		tss, err := List(ctx)
+		if err == nil && len(tss) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after kill-server: List = %v, %v; want empty, no error", tss, err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

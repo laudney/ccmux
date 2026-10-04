@@ -52,6 +52,7 @@ const (
 	IDHermes   ID = "hermes"
 	IDAmp      ID = "amp"
 	IDKiro     ID = "kiro"
+	IDMaki     ID = "maki"
 )
 
 // State enumerates the high-level lifecycle of an agent session, mirrored
@@ -203,7 +204,7 @@ func (c Commands) RoutesThroughOpenRouter(id ID) bool {
 func All() []Agent {
 	return []Agent{
 		Claude{}, Codex{}, Antigravity{}, Cursor{}, Pi{}, Grok{},
-		OpenCode{}, Kimi{}, Droid{}, Copilot{}, Qoder{}, Kilo{}, Hermes{}, Amp{}, Kiro{}, Muse{}, Gemini{},
+		OpenCode{}, Kimi{}, Droid{}, Copilot{}, Qoder{}, Kilo{}, Hermes{}, Amp{}, Kiro{}, Muse{}, Gemini{}, Maki{},
 	}
 }
 
@@ -265,6 +266,8 @@ func ByID(id ID) Agent {
 		return Amp{}
 	case IDKiro:
 		return Kiro{}
+	case IDMaki:
+		return Maki{}
 	}
 	panic("agent: unknown ID " + string(id))
 }
@@ -310,6 +313,8 @@ func ParseID(s string) (ID, bool) {
 		return IDAmp, true
 	case IDKiro:
 		return IDKiro, true
+	case IDMaki:
+		return IDMaki, true
 	}
 	return "", false
 }
@@ -527,6 +532,10 @@ func resumeArgv(id ID, conversationID string, commands Commands) []string {
 		// grok resumes a specific session via `-r, --resume <ID>`
 		// (docs.x.ai/build/cli/headless-scripting).
 		return []string{configuredBinary(IDGrok, "grok", commands), "--resume", conversationID}
+	case IDMaki:
+		// maki resumes a specific session by ID via `-r, --resume <ID>`
+		// (alias `-s, --session`; `maki --help`).
+		return []string{configuredBinary(IDMaki, "maki", commands), "--resume", conversationID}
 	}
 	return nil
 }

@@ -1,0 +1,32 @@
+id = "maki"
+
+# Maki sets no OSC title of its own — the window title is user/plugin
+# territory (maki-lua's maki.ui.set_window_title) — so every rule reads
+# the pane body.
+
+# Status-bar spinner: the last line animates a braille glyph while a
+# turn runs ("⠹ [BUILD] ~/Code/proj:main …"). A maki killed mid-turn
+# freezes its last frame like any spinner rule here; the daemon's
+# signs-of-life check keeps that from ringing.
+[[rules]]
+id = "body_status_spinner_working"
+state = "working"
+priority = 800
+region = "bottom_non_empty_lines(1)"
+line_regex = ['^\s*[\x{2800}-\x{28FF}]\s+\[(?:BUILD|PLAN)\]']
+
+# The status spinner still animates during an approval, so explicit dialogs
+# cannot require an idle pane. The daemon checks whether the process is alive.
+[[rules]]
+id = "body_permission_dialog"
+state = "blocked"
+priority = 900
+region = "bottom_non_empty_lines(40)"
+line_regex = ['^\s*╭ Permission Required ─+╮\s*$']
+
+[[rules]]
+id = "body_question_dialog"
+state = "blocked"
+priority = 900
+region = "bottom_non_empty_lines(3)"
+line_regex = ['^.*Enter\s+(?:submit|toggle).*Esc\s+dismiss.*$']

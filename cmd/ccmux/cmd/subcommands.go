@@ -850,6 +850,8 @@ func agentInstallHint(id agent.ID) string {
 		return "curl -fsSL https://dev.meta.ai/install.sh | bash  (macOS: brew install --cask muse-code); then muse login"
 	case agent.IDKiro:
 		return "see Kiro CLI install at https://kiro.dev/docs/cli"
+	case agent.IDMaki:
+		return "`curl -fsSL https://maki.sh/install.sh | sh` (or see maki docs at maki.sh)"
 	}
 	return ""
 }

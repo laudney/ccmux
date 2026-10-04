@@ -1,0 +1,24 @@
+you> Reply in one short line: what year is it? Do not use tools.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+❯ Queue another prompt...
+────────────────────────────────────────────────────────────────────────────────
+ ⠼ [BUILD]    ~/Code/ccmux:main  ..-org/GLM-5.3-Flash [max] [yolo]  0/1.0m (0%)
