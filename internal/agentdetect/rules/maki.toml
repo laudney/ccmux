@@ -1,0 +1,31 @@
+id = "maki"
+
+# Maki sets no OSC title of its own — the window title is user/plugin
+# territory (maki-lua's maki.ui.set_window_title) — so every rule reads
+# the pane body.
+
+# Status-bar spinner: the last line animates a braille glyph while a
+# turn runs ("⠹ [BUILD] ~/Code/proj:main …"). A maki killed mid-turn
+# freezes its last frame like any spinner rule here; the daemon's
+# signs-of-life check keeps that from ringing.
+[[rules]]
+id = "body_status_spinner_working"
+state = "working"
+priority = 800
+region = "bottom_non_empty_lines(1)"
+regex = ['[\x{2800}-\x{28FF}]']
+
+# Permission dialog: the overlay titled " Permission Required " with the
+# y Allow / n Deny option rows. The dialog outlives the process (tmux
+# keeps the last frame), so it is idle-gated like the other agents'
+# approval rules: a maki that died with the dialog up is not asking.
+[[rules]]
+id = "body_permission_dialog"
+state = "blocked"
+priority = 900
+region = "bottom_non_empty_lines(14)"
+all = [
+  { contains = ["Permission Required"] },
+  { contains = ["Deny"] },
+]
+require_idle = true
