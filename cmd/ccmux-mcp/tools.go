@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
+	"github.com/skzv/ccmux/internal/agent"
 	"github.com/skzv/ccmux/internal/daemon"
 )
 
@@ -61,6 +63,11 @@ type ToolHandler func(ctx context.Context, raw json.RawMessage) (any, error)
 // buildTools is the tool registry. The mutating tools are only added
 // when Server.allowMutate is true.
 func buildTools(s *Server) map[string]Tool {
+	agentIDs := make([]string, 0, len(agent.All()))
+	for _, a := range agent.All() {
+		agentIDs = append(agentIDs, string(a.ID()))
+	}
+	agentChoices := strings.Join(agentIDs, " | ")
 	t := map[string]Tool{
 		"list_sessions": {
 			Description: "List every ccmux/tmux session known to the local ccmuxd, with state (active / idle / needs_input / error), agent, project, host, and last-change time. Use this to answer 'what's running' across all your projects and machines.",
@@ -84,7 +91,7 @@ func buildTools(s *Server) map[string]Tool {
 			Handler:     wrap(s.handleListProjects),
 		},
 		"list_conversations": {
-			Description: "List past coding-agent conversations (Claude / Codex / Antigravity / Cursor / Pi / Grok) sorted by recency. Each entry has the resumable agent ID, the project, the working directory, and a preview of the first user message.",
+			Description: "List past conversations from supported coding agents sorted by recency. Each entry has the resumable agent ID, the project, the working directory, and a preview of the first user message.",
 			InputSchema: emptySchema(),
 			Handler:     wrap(s.handleListConversations),
 		},
@@ -134,7 +141,7 @@ func buildTools(s *Server) map[string]Tool {
 			InputSchema: object(map[string]any{
 				"project":  stringSchema("project name (from list_projects[].name)", true),
 				"path":     stringSchema("working directory; defaults to the project's path on the daemon's host", false),
-				"agent":    stringSchema("agent to launch (claude | codex | antigravity | cursor | pi | grok). Empty = project's recorded default.", false),
+				"agent":    stringSchema("agent to launch ("+agentChoices+"). Empty = project's recorded default.", false),
 				"continue": boolSchema("resume the latest session in this project instead of starting fresh", false),
 				"name":     stringSchema("explicit tmux session name. Empty = derived from project path.", false),
 			}, []string{"project"}),
@@ -146,7 +153,7 @@ func buildTools(s *Server) map[string]Tool {
 			InputSchema: object(map[string]any{
 				"name":  stringSchema("explicit tmux session name. Empty = daemon picks one.", false),
 				"path":  stringSchema("working directory on the daemon's host. Empty = $HOME on the daemon.", false),
-				"agent": stringSchema("agent to launch, or 'shell' for no agent. Empty = daemon default.", false),
+				"agent": stringSchema("agent to launch ("+agentChoices+"), or 'shell' for no agent. Empty = daemon default.", false),
 			}, nil),
 			Handler:  wrap(s.handleSpawnBareSession),
 			Mutating: true,

@@ -184,10 +184,9 @@ type ConversationsConfig struct {
 type AgentsConfig struct {
 	// Default picks which agent the new-project and new-bare-session
 	// forms default to, and which agent the daemon launches when
-	// `ccmux shell` / POST /v1/sessions/bare omits the field. Valid
-	// values: "claude" / "codex" / "antigravity" / "cursor" / "pi"
-	// / "gemini", or the explicit string "shell" for a bare $SHELL with
-	// no agent. Empty falls back to "claude" so a fresh install gets
+	// `ccmux shell` / POST /v1/sessions/bare omits the field. Any ID
+	// accepted by agent.ParseID is valid, or "shell" for a bare $SHELL
+	// with no agent. Empty falls back to "claude" so a fresh install gets
 	// an agent by default — the multi-agent refactor's intent.
 	Default string `toml:"default"`
 

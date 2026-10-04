@@ -14,7 +14,7 @@ import (
 )
 
 // newListConversationsCmd: `ccmux list-conversations` prints a flat
-// table of past agent conversations (Claude + Codex + Antigravity)
+// table of past conversations from supported transcript readers,
 // sorted by recency. This is the CLI mirror of the Conversations
 // TUI screen — same data source, same row order — useful for
 // scripting and as the end-to-end smoke test of the data layer.

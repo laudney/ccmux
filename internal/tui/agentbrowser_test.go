@@ -139,6 +139,7 @@ func TestApp_WindowSizeReachesAgentsBrowsers(t *testing.T) {
 		"codex":       {a2.agentsM.codex.browser.preview.Width, a2.agentsM.codex.browser.preview.Height},
 		"antigravity": {a2.agentsM.antigravity.browser.preview.Width, a2.agentsM.antigravity.browser.preview.Height},
 		"cursor":      {a2.agentsM.cursor.browser.preview.Width, a2.agentsM.cursor.browser.preview.Height},
+		"maki":        {a2.agentsM.maki.browser.preview.Width, a2.agentsM.maki.browser.preview.Height},
 	} {
 		if vp.w == 80 && vp.h == 20 {
 			t.Errorf("%s browser viewport still at the constructed 80×20 after WindowSizeMsg", name)

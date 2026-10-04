@@ -324,8 +324,7 @@ func (c *Client) Preview(ctx context.Context, name string, lines int) (PreviewRe
 	return out, nil
 }
 
-// Conversations returns past agent transcripts (Claude / Codex /
-// Antigravity / Cursor / Pi / Grok) sorted by most-recent. Powers the
+// Conversations returns supported agent transcripts sorted by most-recent. Powers the
 // Conversations screen and the `list_conversations` MCP tool.
 func (c *Client) Conversations(ctx context.Context) ([]Conversation, error) {
 	var out []Conversation

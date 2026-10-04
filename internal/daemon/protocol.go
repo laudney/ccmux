@@ -21,8 +21,8 @@ type SessionState struct {
 	LastChange  time.Time `json:"last_change"`  // pane content last changed
 	PromptCount int       `json:"prompt_count"` // turns ended in needs_input; kept on the session, like Seen
 	// Agent is the AI agent driving this session, sourced from the
-	// project's .ccmux/agent sidecar. One of "claude" / "codex" /
-	// "antigravity" / "gemini". Empty for sessions
+	// project's .ccmux/agent sidecar or tmux tag. A registered agent
+	// ID, or "shell" for a plain shell. Empty for sessions
 	// whose project we couldn't resolve (which the client should treat
 	// as claude for back-compat).
 	Agent string `json:"agent,omitempty"`
@@ -94,7 +94,7 @@ type NewSessionRequest struct {
 // NewBareSessionRequest is the body of POST /v1/sessions/bare. A
 // "bare" session is one not tied to a project — no scaffold, no
 // description — just a tmux session running the picked agent (or
-// $SHELL when Agent is empty) at Path. The Sessions tab's "new
+// a shell when selected) at Path. The Sessions tab's "new
 // session" form posts this to either the local daemon (for a
 // local-host session) or to a tailnet peer's daemon (cross-device
 // session on the Mac mini, say).
@@ -114,10 +114,8 @@ type NewBareSessionRequest struct {
 	// resolve client-side; the home directory of the *remote*
 	// machine is what matters when "any device" is the point.
 	Path string `json:"path,omitempty"`
-	// Agent picks which AI agent the new session launches. One of
-	// "claude" / "codex" / "antigravity" / "gemini", or the explicit "shell" for no agent. Empty falls
-	// back to the daemon's configured sessions.default_agent; if
-	// that's also empty / "shell" the daemon spawns $SHELL.
+	// Agent picks a registered AI agent, or "shell" for no agent. Empty
+	// uses the daemon's configured agents.default, then $SHELL if unset.
 	Agent string `json:"agent,omitempty"`
 }
 
@@ -319,8 +317,8 @@ type OpenRouterSpend struct {
 // Claude / Codex / Antigravity sessions without each needing to know
 // the on-disk layouts.
 type Conversation struct {
-	ID       string    `json:"id"`                // agent's own UUID; passed to its --resume flag
-	Agent    string    `json:"agent"`             // "claude" | "codex" | "antigravity"
+	ID       string    `json:"id"`                // native session identifier used by its resume command
+	Agent    string    `json:"agent"`             // registered agent ID
 	Project  string    `json:"project,omitempty"` // best-effort project label
 	Path     string    `json:"path,omitempty"`    // session's working directory if known
 	Preview  string    `json:"preview,omitempty"` // first user message (empty for antigravity)

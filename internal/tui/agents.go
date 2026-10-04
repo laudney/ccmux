@@ -37,6 +37,7 @@ type agentsModel struct {
 	codex       codexConfigModel
 	antigravity antigravityConfigModel
 	cursor      cursorAgentModel
+	maki        makiConfigModel
 }
 
 func newAgents(st styles.Styles, km Keymap) agentsModel {
@@ -48,6 +49,7 @@ func newAgents(st styles.Styles, km Keymap) agentsModel {
 		codex:       newCodexConfig(st),
 		antigravity: newAntigravityConfig(st),
 		cursor:      newCursorAgent(st),
+		maki:        newMakiConfig(st),
 	}
 }
 
@@ -66,6 +68,7 @@ func (m *agentsModel) Reload() {
 	m.claude.reload()
 	m.codex.reload()
 	m.antigravity.reload()
+	m.maki.reload()
 }
 
 // SetSize is called by App on every tea.WindowSizeMsg with the body
@@ -73,7 +76,7 @@ func (m *agentsModel) Reload() {
 // math (sub-tab header row + the shared Pane frame) and pushes the
 // inner size into every sub-model so their embedded browsers persist
 // real viewport geometry for Update-side scrolling and Glamour
-// wrapping. All four sub-tabs get the size (not just the active one)
+// wrapping. All config browsers get the size (not just the active one)
 // so switching tabs never lands on a stale 80×20 viewport.
 func (m *agentsModel) SetSize(width, height int) {
 	header := m.renderSubtabs(width)
@@ -89,11 +92,12 @@ func (m *agentsModel) SetSize(width, height int) {
 	m.codex.setSize(innerW, innerH)
 	m.antigravity.setSize(innerW, innerH)
 	m.cursor.setSize(innerW, innerH)
+	m.maki.setSize(innerW, innerH)
 }
 
 func (m agentsModel) Update(msg tea.Msg) (agentsModel, tea.Cmd) {
 	// Sub-tab navigation. `tab`/`shift+tab`/`h`/`l` cycle between
-	// the four agent sub-tabs. The embedded browser inside each sub-
+	// the agent config sub-tabs. The embedded browser inside each sub-
 	// model owns `←`/`→` to swap pane focus between list and
 	// preview, and `j/k/up/down/enter` for list nav + viewport
 	// scroll — so tab and the arrow keys never collide.
@@ -157,11 +161,14 @@ func (m agentsModel) Update(msg tea.Msg) (agentsModel, tea.Cmd) {
 		c, cmd := m.cursor.Update(msg)
 		m.cursor = c
 		return m, cmd
-	case agent.IDPi, agent.IDGrok, agent.IDMuse, agent.IDMaki:
+	case agent.IDMaki:
+		c, cmd := m.maki.Update(msg)
+		m.maki = c
+		return m, cmd
+	case agent.IDPi, agent.IDGrok, agent.IDMuse:
 		// pi and grok are AGENTS.md-centric and manage their own
 		// config via their CLIs — no editable surface in ccmux yet,
-		// so the sub-tab is a placeholder. Same for maki: its config
-		// is init.lua + providers.toml, managed by the maki CLI.
+		// so the sub-tab is a placeholder.
 		return m, nil
 	}
 	return m, nil
@@ -184,9 +191,12 @@ func (m agentsModel) ModalOpen() bool {
 func (m agentsModel) capturesInput() bool { return m.ModalOpen() }
 
 // onSubtabSwitch refreshes per-sub-tab background data when the user
-// flips to a new sub-tab. Today only the Cursor sub-tab needs this —
-// its SQLite-backed data has a 30s TTL.
+// flips to a new sub-tab. Maki re-reads its files; Cursor's SQLite-
+// backed data has a 30s TTL.
 func (m agentsModel) onSubtabSwitch() (agentsModel, tea.Cmd) {
+	if m.active == agent.IDMaki {
+		m.maki.reload()
+	}
 	if m.active == agent.IDCursor {
 		c, cmd := m.cursor.EnsureFresh()
 		m.cursor = c
@@ -218,7 +228,7 @@ func (m agentsModel) HelpBarProps(width int) components.HelpBarProps {
 		{Key: "←→", Label: tr("pane"), Priority: 5},
 	}
 	switch m.active {
-	case agent.IDGemini:
+	case agent.IDGemini, agent.IDMaki:
 		hints = append(hints, components.KeyHint{Key: "e", Label: tr("edit"), Priority: 4})
 	case agent.IDClaude:
 		hints = append(hints,
@@ -283,7 +293,7 @@ func (m agentsModel) View(width, height int) string {
 	case agent.IDGrok:
 		body = m.st.Muted.Render(tr("Grok settings are managed by the grok CLI (~/.grok/config.toml + AGENTS.md)."))
 	case agent.IDMaki:
-		body = m.st.Muted.Render(tr("Maki settings are managed by the maki CLI (~/.config/maki/init.lua + providers.toml). Run maki auth login to sign in."))
+		body = m.maki.ViewBody(innerW, innerH)
 	}
 	inner := lipgloss.JoinVertical(lipgloss.Left, header, "", body)
 	// Never taller than the pane: overflowing content was clipped off the
@@ -292,14 +302,14 @@ func (m agentsModel) View(width, height int) string {
 	return m.st.Pane.Width(width - 2).Height(height - 2).MaxWidth(width).Render(strings.Join(lines, "\n"))
 }
 
-// renderSubtabs draws the • Claude  • Codex  • Antigravity  • Cursor
-// row. Each sub-tab is preceded by a `•` dot in the agent's accent
+// renderSubtabs draws the agent config sub-tabs. Each sub-tab is
+// preceded by a `•` dot in the agent's accent
 // color (the same convention every other agent-navigation surface
 // uses — the Projects legend + per-row dots, the Conversations
 // agent nav, and the Agents browser section headers). The active
 // sub-tab keeps the accent on the label text itself + bold weight;
 // inactive sub-tabs drop the label to muted so the eye lands on the
-// active one. The dot stays colored on every sub-tab so all four
+// active one. The dot stays colored on every sub-tab so the
 // agents remain visually identifiable at a glance.
 func (m agentsModel) renderSubtabs(width int) string {
 	parts := []string{}
@@ -346,23 +356,17 @@ func (m agentsModel) renderSubtabs(width int) string {
 	return strings.Join(rows, "\n")
 }
 
-// agentConfigSubtabs is the fixed set of agents that get a config
-// sub-tab on the Agents screen. Deliberately NOT agent.All(): the
-// second-wave agents (OpenCode, Kimi, Droid, …) are launch-and-
-// supervise only — pickable for a project and state-detected on the
-// dashboard, but they manage their own config through their own CLIs
-// and AGENTS.md, so there's nothing for ccmux to render or edit here
-// (the same reason pi and grok are placeholder tabs). Pinning this list
-// also keeps the sub-tab row from overflowing as the agent roster
-// grows.
+// agentConfigSubtabs lists agents with a config browser or help view.
+// Others remain launch-and-supervise only. Add a tab together with its
+// Update/View implementation; this list deliberately differs from All().
 func agentConfigSubtabs() []agent.Agent {
 	return []agent.Agent{
-		agent.Claude{}, agent.Codex{}, agent.Antigravity{}, agent.Cursor{}, agent.Pi{}, agent.Grok{}, agent.Muse{}, agent.Gemini{},
+		agent.Claude{}, agent.Codex{}, agent.Antigravity{}, agent.Cursor{}, agent.Pi{}, agent.Grok{}, agent.Muse{}, agent.Gemini{}, agent.Maki{},
 	}
 }
 
 // nextAgentSubtab cycles the config sub-tabs (agentConfigSubtabs order).
-// Wraps at the ends so tab from Grok lands back on Claude.
+// Wraps at the ends so tab from Maki lands back on Claude.
 func nextAgentSubtab(cur agent.ID, dir int) agent.ID {
 	all := agentConfigSubtabs()
 	for i, a := range all {

@@ -192,6 +192,11 @@ func tierField(agentID, label, hint string, options []string) editableField {
 }
 
 func editableFields() []editableField {
+	agentOptions := make([]string, 0, len(agent.All())+1)
+	for _, a := range agent.All() {
+		agentOptions = append(agentOptions, string(a.ID()))
+	}
+	agentOptions = append(agentOptions, "shell")
 	return []editableField{
 		tierField("claude", "claude.tier",
 			tr("Anthropic / Claude.ai tier. Enter cycles: api → pro → max5x → max20x. Drives the dashboard 5-hour quota bar."),
@@ -232,8 +237,8 @@ func editableFields() []editableField {
 		},
 		{
 			label:   "agents.default",
-			hint:    tr("Default agent for new projects and bare sessions. Enter cycles: claude → codex → antigravity → cursor → gemini → shell."),
-			options: []string{"claude", "codex", "antigravity", "cursor", "gemini", "shell"},
+			hint:    tr("Default agent for new projects and bare sessions. Enter cycles through supported agents, or shell for no agent."),
+			options: agentOptions,
 			chip:    true,
 			get:     func(c *config.Config) string { return c.Agents.Default },
 			set: func(c *config.Config, raw string) error {
@@ -252,7 +257,7 @@ func editableFields() []editableField {
 				// Antigravity remain separate choices.
 				id, ok := agent.ParseID(raw)
 				if !ok {
-					return fmt.Errorf("must be one of: claude, codex, antigravity, cursor, gemini, shell")
+					return fmt.Errorf("must be one of: %s", strings.Join(agentOptions, ", "))
 				}
 				c.Agents.Default = string(id)
 				return nil

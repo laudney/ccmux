@@ -91,6 +91,49 @@ func TestTUIAgents_CodexReasoningEffortKeyPersists(t *testing.T) {
 	}
 }
 
+func TestTUIAgents_MakiNativeConfigEditor(t *testing.T) {
+	e := newEnv(t)
+	configHome := filepath.Join(e.Home, "native config")
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("VISUAL", "")
+	editor := filepath.Join(e.Home, "maki-test-editor")
+	writeFile(t, editor, "#!/bin/sh\nprintf '%s\\n' '# edited-maki-provider' > \"$1\"\n")
+	if err := os.Chmod(editor, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("EDITOR", editor)
+	cfg := e.defaultConfig()
+	cfg.Tour.Shown = true
+	cfg.Update.AutoCheck = false
+	e.writeConfig(cfg)
+	e.startDaemon()
+
+	root := filepath.Join(configHome, "maki")
+	initPath := filepath.Join(root, "init.lua")
+	providerPath := filepath.Join(root, "providers.toml")
+	writeFile(t, initPath, "-- original-maki-init\n")
+	writeFile(t, providerPath, "# original-maki-provider\n")
+	d := newTUIDriver(t, e, 40, 120)
+	d.WaitFor("Sessions")
+	d.Send("5")
+	d.WaitFor("Claude Code Configuration")
+	// Maki is the last sub-tab, so h from Claude reaches it directly.
+	d.Send("h")
+	d.WaitFor("Maki configuration")
+	d.WaitFor("original-maki-init")
+	d.Send("j")
+	d.WaitFor("original-maki-provider")
+	d.Send("e")
+	d.WaitFor("edited-maki-provider")
+	if got := readFile(t, providerPath); got != "# edited-maki-provider\n" {
+		t.Fatalf("editor did not receive the native providers.toml path: %q", got)
+	}
+	if got := readFile(t, initPath); got != "-- original-maki-init\n" {
+		t.Fatalf("editing providers.toml changed init.lua: %q", got)
+	}
+	d.Quit()
+}
+
 func waitForTUI(t *testing.T, output *safeBuffer, want string) {
 	t.Helper()
 	if !waitFor(5*time.Second, func() bool {

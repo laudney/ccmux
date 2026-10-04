@@ -389,7 +389,7 @@ func TestAgents_HelpBar_PerSubtabKeys(t *testing.T) {
 // either the call site or the helper.
 func TestAgents_SubtabRow_UsesAgentAccent(t *testing.T) {
 	st := styles.Default()
-	for _, id := range []agent.ID{agent.IDClaude, agent.IDCodex, agent.IDAntigravity, agent.IDCursor} {
+	for _, id := range []agent.ID{agent.IDClaude, agent.IDCodex, agent.IDAntigravity, agent.IDCursor, agent.IDMaki} {
 		t.Run(string(id), func(t *testing.T) {
 			m := newAgents(st, DefaultKeymap())
 			m.active = id

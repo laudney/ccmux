@@ -57,8 +57,8 @@ func cliProjectsRoot(cfg config.Config) (string, error) {
 
 var rootCmd = &cobra.Command{
 	Use:   "ccmux [projects-dir]",
-	Short: "Manage Claude Code sessions across tmux, Mosh, and Tailscale",
-	Long: `ccmux is a TUI for starting, resuming, and supervising Claude Code
+	Short: "Manage coding agent sessions across tmux, Mosh, and Tailscale",
+	Long: `ccmux is a TUI for starting, resuming, and supervising coding agent
 sessions on top of tmux, with optional remote-host support over Tailscale and
 Mosh-friendly mobile workflow.
 
